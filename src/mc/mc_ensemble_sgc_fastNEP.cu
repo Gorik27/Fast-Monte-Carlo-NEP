@@ -161,8 +161,11 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
   kappa = kappa_input;
   NN_ij.resize(1);
   NL_ij.resize(n_max);
-  pe_before_local.resize(n_max);
-  delta_pe.resize(n_max);
+
+  pe_nep_before_local.resize(n_max);
+  delta_pe_nep.resize(n_max);
+  delta_pe_zbl.resize(n_max);
+
   NN_angular_i.resize(m_max);
   t2_radial.resize(n_max);
   is_neigh_angular.resize(n_max);
@@ -180,8 +183,8 @@ static __global__ void get_neighbors_of_i_fastNEP(
   const double* __restrict__ g_z,
   int* g_NN_i,
   int* g_NL_i,
-  float* g_pe_before,
-  float* g_pe_before_local)
+  float* g_pe_nep_before,
+  float* g_pe_nep_before_local)
 {
   int n = blockIdx.x * blockDim.x + threadIdx.x;
   if (n < N && n != i) {
@@ -197,7 +200,7 @@ static __global__ void get_neighbors_of_i_fastNEP(
 
     if (distance_square_i < rc_radial_square) {
       int index = atomicAdd(g_NN_i, 1);
-      g_pe_before_local[index] = g_pe_before[n]; 
+      g_pe_nep_before_local[index] = g_pe_nep_before[n]; 
       g_NL_i[index] = n;
     }
   }
@@ -334,7 +337,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
   std::uniform_int_distribution<int> r1(0, group_size - 1);
 
-  nep_energy_fast.compute_large_box( // compute all descriptors and energy and save it to memeory (nep_data: pe, q_radial, s_angular)
+  nep_energy_fast.compute_large_box( // compute all descriptors and energy and save it to memeory (nep_data: pe_nep, q_radial, s_angular)
     box, 
     atom.type, 
     atom.position_per_atom);
@@ -363,7 +366,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     }
 
     NN_ij.fill(0);
-    pe_before_local.fill(0.0f);
+    pe_nep_before_local.fill(0.0f);
 
     get_neighbors_of_i_fastNEP<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
       atom.number_of_atoms,
@@ -375,15 +378,15 @@ void MC_Ensemble_SGC_fastNEP::compute(
       atom.position_per_atom.data() + atom.number_of_atoms * 2,
       NN_ij.data(),
       NL_ij.data(),
-      nep_energy_fast.nep_data.pe.data(),
-      pe_before_local.data());
+      nep_energy_fast.nep_data.pe_nep.data(),
+      pe_nep_before_local.data());
     GPU_CHECK_KERNEL
 
     int NN_ij_cpu;
     NN_ij.copy_to_host(&NN_ij_cpu);
 
-    gpuMemcpy(&pe_before_local.data()[NN_ij_cpu], &nep_energy_fast.nep_data.pe.data()[i], sizeof(float), gpuMemcpyDeviceToDevice); 
-
+    gpuMemcpy(&pe_nep_before_local.data()[NN_ij_cpu], &nep_energy_fast.nep_data.pe_nep.data()[i], sizeof(float), gpuMemcpyDeviceToDevice); 
+   
     NN_angular_i.fill(0);
     nep_energy_fast.nep_data.q_radial_local.fill(0.0f);
     nep_energy_fast.nep_data.s_angular_local.fill(0.0f);
@@ -417,8 +420,9 @@ void MC_Ensemble_SGC_fastNEP::compute(
     
     nep_energy_fast.nep_data.q_radial_trial_local.fill(0.0f);
     nep_energy_fast.nep_data.s_angular_trial_local.fill(0.0f);
+    delta_pe_zbl.fill(0.0f);
 
-    nep_energy_fast.find_energy( // calculate energy differences for neighbors of th central (i) atom after MC trial swap: delta_pe
+    nep_energy_fast.find_energy( // calculate energy differences for neighbors of th central (i) atom after MC trial swap: delta_pe_nep, delta_pe_zbl
       NN_ij_cpu,
       i,
       NN_angular_i.data(),
@@ -429,18 +433,26 @@ void MC_Ensemble_SGC_fastNEP::compute(
       y12_radial.data(),
       z12_radial.data(),
       is_neigh_angular.data(),
-      delta_pe.data(),
-      pe_before_local.data());
+      delta_pe_nep.data(),
+      pe_nep_before_local.data(),
+      delta_pe_zbl.data());
     
-    std::vector<float> delta_pe_cpu(NN_ij_cpu+1);
-    delta_pe.copy_to_host(delta_pe_cpu.data(), NN_ij_cpu+1);
+    std::vector<float> delta_pe_nep_cpu(NN_ij_cpu+1);
+    delta_pe_nep.copy_to_host(delta_pe_nep_cpu.data(), NN_ij_cpu+1);
 
     float energy_difference = 0.0f;
     for (int n = 0; n < NN_ij_cpu; ++n) {
-      energy_difference += delta_pe_cpu[n];
+      energy_difference += delta_pe_nep_cpu[n];
     }
-    energy_difference += delta_pe_cpu[NN_ij_cpu]; // delta energy of the central (i) atom
+    energy_difference += delta_pe_nep_cpu[NN_ij_cpu]; // delta energy of the central (i) atom
     //mc_output << i << "; " << type_i << "; " << type_j << "; " << energy_difference << std::endl; // for debugging
+
+    std::vector<float> delta_pe_zbl_cpu(NN_ij_cpu);
+    delta_pe_zbl.copy_to_host(delta_pe_zbl_cpu.data(), NN_ij_cpu);
+
+    for (int n = 0; n < NN_ij_cpu; ++n) {
+      energy_difference += delta_pe_zbl_cpu[n];
+    }
 
     if (!is_vcsgc) {
       energy_difference += mu_or_phi[index_new_species] - mu_or_phi[index_old_species];
@@ -478,10 +490,10 @@ void MC_Ensemble_SGC_fastNEP::compute(
         atom.velocity_per_atom.data() + atom.number_of_atoms,
         atom.velocity_per_atom.data() + atom.number_of_atoms * 2);
 
-      nep_energy_fast.accept_trial( // update stored values of descriptors and potential energies
+      nep_energy_fast.accept_trial( // update stored values of descriptors and potential energies for NEP
         NN_ij_cpu, 
         NL_ij.data(),
-        delta_pe.data(),
+        delta_pe_nep.data(),
         i);
     }
   }

@@ -47,8 +47,9 @@ private:
   GPU_Vector<int> NN_ij;
   GPU_Vector<int> NL_ij;
   GPU_Vector<int> NN_angular_i;
-  GPU_Vector<float> pe_before_local;
-  GPU_Vector<float> delta_pe;
+  GPU_Vector<float> pe_nep_before_local;
+  GPU_Vector<float> delta_pe_nep;
+  GPU_Vector<float> delta_pe_zbl;
   double swap_fraction_mc;
   bool is_vcsgc = false;
   std::vector<std::string> species;

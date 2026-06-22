@@ -46,7 +46,7 @@ struct NEP_Fast_Data {
   int s_angular_local_size;
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
-  GPU_Vector<float> pe;
+  GPU_Vector<float> pe_nep;
 #ifdef USE_TABLE
   GPU_Vector<float> gn_radial;   // tabulated gn_radial functions
   GPU_Vector<float> gnp_radial;  // tabulated gnp_radial functions
@@ -125,6 +125,8 @@ public:
     const int num_atoms,
     const int n_max, 
     const int m_max);
+
+
   void find_energy(
       const int N,
       const int i,
@@ -136,8 +138,9 @@ public:
       const float* g_y12_radial,
       const float* g_z12_radial,
       const bool* g_is_neigh_angular,
-      float* g_delta_pe,
-      float* g_pe);
+      float* g_delta_pe_nep,
+      float* g_pe_nep,
+      float* g_delta_pe_zbl);
 
   void compute_large_box(
     Box& box,
@@ -147,7 +150,7 @@ public:
   void accept_trial(
     const int N_local,
     const int* atom_local,
-    float* g_delta_pe,
+    float* g_delta_pe_nep,
     const int i);
 
   bool has_dftd3 = false;
