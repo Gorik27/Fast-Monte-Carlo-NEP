@@ -38,6 +38,7 @@ private:
   bool do_mcmd = false;
   int num_steps_md = 0;
   int num_steps_mc = 0;
+  double swap_fraction_mc = 0.0;
   int num_types_mc = 0;
   int grouping_method = -1;
   int group_id = -1;

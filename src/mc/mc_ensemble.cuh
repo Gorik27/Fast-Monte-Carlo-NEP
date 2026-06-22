@@ -18,6 +18,7 @@
 #include "model/box.cuh"
 #include "model/group.cuh"
 #include "nep_energy.cuh"
+#include "nep_energy_fast.cuh"
 #include "utilities/gpu_vector.cuh"
 #include <fstream>
 #include <iostream>
@@ -28,6 +29,7 @@ class MC_Ensemble
 {
 public:
   MC_Ensemble(const char** param, int num_param);
+  MC_Ensemble(const char** param, int num_param, const int num_atoms); // overload in order to provide number of atoms to NEP_fast initialisation
   virtual ~MC_Ensemble(void);
 
   virtual void compute(
@@ -38,6 +40,9 @@ public:
     std::vector<Group>& group,
     int grouping_method,
     int group_id) = 0;
+
+  const int n_max = 1000; // size of arrays with radial neighbors quantities
+  const int m_max = 1000; // size of arrays with angular neighbors quantities
 
 protected:
   int num_steps_mc = 0;
@@ -65,7 +70,8 @@ protected:
   GPU_Vector<float> pe_before;
   GPU_Vector<float> pe_after;
 
-  NEP_Energy nep_energy;
-
   bool check_if_small_box(const double rc, const Box& box);
+
+  NEP_Energy nep_energy;
+  NEP_Energy_fast nep_energy_fast;
 };

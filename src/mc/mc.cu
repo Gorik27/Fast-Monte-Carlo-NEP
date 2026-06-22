@@ -20,6 +20,7 @@ The driver class for the various MC ensembles.
 #include "mc.cuh"
 #include "mc_ensemble_canonical.cuh"
 #include "mc_ensemble_sgc.cuh"
+#include "mc_ensemble_sgc_fastNEP.cuh"
 #include "model/atom.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_macro.cuh"
@@ -219,25 +220,41 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
   } else if (strcmp(param[1], "vcsgc") == 0) {
     printf("Perform VCSGC MCMD:\n");
     mc_ensemble_type = 2;
-  } else {
+  } else if (strcmp(param[1], "sgc_fast") == 0) {
+    printf("Perform SGC MCMD using the fast method:\n");
+    mc_ensemble_type = 3;
+  } else if (strcmp(param[1], "vcsgc_fast") == 0) {
+    printf("Perform VCSGC MCMD using the fast method:\n");
+    mc_ensemble_type = 4;
+  }  else {
     PRINT_INPUT_ERROR("invalid MC ensemble for MCMD.\n");
   }
 
   if (!is_valid_int(param[2], &num_steps_md)) {
-    PRINT_INPUT_ERROR("number of MD steps for MCMD should be an integer.\n");
-  }
+      PRINT_INPUT_ERROR("number of MD steps for MCMD should be an integer.\n");
+    }
   if (num_steps_md <= 0) {
-    PRINT_INPUT_ERROR("number of MD steps for MCMD should be positive.\n");
-  }
+      PRINT_INPUT_ERROR("number of MD steps for MCMD should be positive.\n");
+    }
 
-  if (!is_valid_int(param[3], &num_steps_mc)) {
-    PRINT_INPUT_ERROR("number of MC steps for MCMD should be an integer.\n");
+  if (mc_ensemble_type >=0 && mc_ensemble_type <=2) {
+    if (!is_valid_int(param[3], &num_steps_mc)) {
+      PRINT_INPUT_ERROR("number of MC steps for MCMD should be an integer.\n");
+    }
+    if (num_steps_mc <= 0) {
+      PRINT_INPUT_ERROR("number of MC steps for MCMD should be positive.\n");
+    }
+    printf("    after every %d MD steps, do %d MC trials.\n", num_steps_md, num_steps_mc);
   }
-  if (num_steps_mc <= 0) {
-    PRINT_INPUT_ERROR("number of MC steps for MCMD should be positive.\n");
+  else if (mc_ensemble_type >=3 && mc_ensemble_type <=4){
+    if (!is_valid_real(param[3], &swap_fraction_mc)) {
+      PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be a number.\n");
+    }
+    if (swap_fraction_mc <= 0) {
+      PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be positive.\n");
+    }
+    printf("    after every %d MD steps, swap %g atoms via MC.\n", num_steps_md, swap_fraction_mc);
   }
-
-  printf("    after every %d MD steps, do %d MC trials.\n", num_steps_md, num_steps_mc);
 
   if (!is_valid_real(param[4], &temperature_initial)) {
     PRINT_INPUT_ERROR("initial temperature for MCMD should be a number.\n");
@@ -258,7 +275,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     temperature_initial,
     temperature_final);
 
-  if (mc_ensemble_type == 1 || mc_ensemble_type == 2) {
+  if (mc_ensemble_type == 1 || mc_ensemble_type == 2 || mc_ensemble_type == 3 || mc_ensemble_type == 4) {
     if (num_param < 7) {
       PRINT_INPUT_ERROR("reading error for num_types in SGC/VCSGC MCMD.\n");
     }
@@ -285,7 +302,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     }
   }
 
-  if (mc_ensemble_type == 2) {
+  if (mc_ensemble_type == 2 || mc_ensemble_type == 4) {
     if (num_param < 7 + num_types_mc * 2 + 1) {
       PRINT_INPUT_ERROR("Should have kappa for VCSGC.\n");
     }
@@ -299,9 +316,9 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
   }
 
   int num_param_before_group = 6;
-  if (mc_ensemble_type == 1) {
+  if (mc_ensemble_type == 1 || mc_ensemble_type == 3) {
     num_param_before_group = 7 + num_types_mc * 2;
-  } else if (mc_ensemble_type == 2) {
+  } else if (mc_ensemble_type == 2 || mc_ensemble_type == 4) {
     num_param_before_group = 8 + num_types_mc * 2;
   }
 
@@ -327,6 +344,14 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC(
       param, num_param, num_steps_mc, true, species, types, num_atoms_species, mu_or_phi, kappa));
+  } else if (mc_ensemble_type == 3) {
+    check_species_sgc(groups, atom);
+    mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
+      atom.number_of_atoms, param, num_param, swap_fraction_mc, false, species, types, num_atoms_species, mu_or_phi, kappa));
+  } else if (mc_ensemble_type == 4) {
+    check_species_sgc(groups, atom);
+    mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
+      atom.number_of_atoms, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, kappa));
   }
 
   do_mcmd = true;

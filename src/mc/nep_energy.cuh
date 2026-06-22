@@ -22,25 +22,22 @@ class NEP_Energy
 {
 public:
   struct ParaMB {
+    bool use_typewise_cutoff = false;
     bool use_typewise_cutoff_zbl = false;
+    float typewise_cutoff_radial_factor = 0.0f;
+    float typewise_cutoff_angular_factor = 0.0f;
     float typewise_cutoff_zbl_factor = 0.0f;
     int version = 4;            // NEP version, 3 for NEP3 and 4 for NEP4
-    float rc_radial_max = 0.0f; 
-    float rc_angular_max = 0.0f;
-    float rc_radial[NUM_ELEMENTS];     // radial cutoff
-    float rc_angular[NUM_ELEMENTS];    // angular cutoff
+    float rc_radial = 0.0f;     // radial cutoff
+    float rc_angular = 0.0f;    // angular cutoff
+    float rcinv_radial = 0.0f;  // inverse of the radial cutoff
+    float rcinv_angular = 0.0f; // inverse of the angular cutoff
     int MN_radial = 200;
     int MN_angular = 100;
     int n_max_radial = 0;  // n_radial = 0, 1, 2, ..., n_max_radial
     int n_max_angular = 0; // n_angular = 0, 1, 2, ..., n_max_angular
     int L_max = 0;         // l = 0, 1, 2, ..., L_max
     int dim_angular;
-    int has_q_222 = 0;
-    int has_q_1111 = 0;
-    int has_q_112 = 0;
-    int has_q_123 = 0;
-    int has_q_233 = 0;
-    int has_q_134 = 0;
     int num_L;
     int basis_size_radial = 8;  // for nep3
     int basis_size_angular = 8; // for nep3
@@ -48,6 +45,7 @@ public:
     int num_c_radial = 0;       // for nep3
     int num_types = 0;
     float q_scaler[140];
+    int atomic_numbers[NUM_ELEMENTS];
   };
 
   struct ANN {

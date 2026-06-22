@@ -1,0 +1,1 @@
+Новая версия GPUMD с fastNEP

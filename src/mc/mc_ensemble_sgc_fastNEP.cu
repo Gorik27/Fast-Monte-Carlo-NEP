@@ -26,10 +26,12 @@ Calculations of excess free energies of precipitates via direct thermodynamic
 integration across phase boundaries, Phys. Rev. B 86, 134204 (2012).
 ------------------------------------------------------------------------------*/
 
-#include "mc_ensemble_sgc.cuh"
+#include "mc_ensemble_sgc_fastNEP.cuh"
 #include "utilities/gpu_macro.cuh"
+#include "utilities/nep_utilities.cuh"
 #include <map>
 #include <cstring>
+#include <cmath>
 
 const std::map<std::string, double> MASS_TABLE{
   {"H", 1.0080000000},
@@ -136,19 +138,21 @@ const std::map<std::string, double> MASS_TABLE{
   {"No", 259},
   {"Lr", 262}};
 
-MC_Ensemble_SGC::MC_Ensemble_SGC(
+MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
+  int num_atoms_input,
   const char** param,
   int num_param,
-  int num_steps_mc_input,
+  double swap_fraction_mc_input,
   bool is_vcsgc_input,
   std::vector<std::string>& species_input,
   std::vector<int>& types_input,
   std::vector<int>& num_atoms_species_input,
   std::vector<double>& mu_or_phi_input,
   double kappa_input)
-  : MC_Ensemble(param, num_param)
+  : MC_Ensemble(param, num_param, num_atoms_input)
 {
-  num_steps_mc = num_steps_mc_input;
+  num_atoms = num_atoms_input;
+  swap_fraction_mc = swap_fraction_mc_input;
   is_vcsgc = is_vcsgc_input;
   species = species_input;
   types = types_input;
@@ -156,46 +160,17 @@ MC_Ensemble_SGC::MC_Ensemble_SGC(
   mu_or_phi = mu_or_phi_input;
   kappa = kappa_input;
   NN_ij.resize(1);
-  NL_ij.resize(1000);
+  NL_ij.resize(n_max);
+  pe_before_local.resize(n_max);
+  delta_pe.resize(n_max);
+  NN_angular_i.resize(m_max);
+  t2_radial.resize(n_max);
+  is_neigh_angular.resize(n_max);
 }
 
-MC_Ensemble_SGC::~MC_Ensemble_SGC(void) { mc_output.close(); }
+MC_Ensemble_SGC_fastNEP::~MC_Ensemble_SGC_fastNEP(void) { mc_output.close(); }
 
-static __global__ void get_types(
-  const int N,
-  const int i,
-  const int type_j,
-  const int* g_type,
-  int* g_type_before,
-  int* g_type_after)
-{
-  int n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n < N) {
-    g_type_before[n] = g_type[n];
-    g_type_after[n] = g_type[n];
-    if (n == i) {
-      g_type_after[i] = type_j;
-    }
-  }
-}
-
-static __global__ void find_local_types(
-  const int N_local,
-  const int* atom_local,
-  const int* g_type_before,
-  const int* g_type_after,
-  int* g_local_type_before,
-  int* g_local_type_after)
-{
-  int k = blockIdx.x * blockDim.x + threadIdx.x;
-  if (k < N_local) {
-    int n = atom_local[k];
-    g_local_type_before[k] = g_type_before[n];
-    g_local_type_after[k] = g_type_after[n];
-  }
-}
-
-static __global__ void get_neighbors_of_i(
+static __global__ void get_neighbors_of_i_fastNEP(
   const int N,
   const Box box,
   const int i,
@@ -204,10 +179,12 @@ static __global__ void get_neighbors_of_i(
   const double* __restrict__ g_y,
   const double* __restrict__ g_z,
   int* g_NN_i,
-  int* g_NL_i)
+  int* g_NL_i,
+  float* g_pe_before,
+  float* g_pe_before_local)
 {
   int n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n < N) {
+  if (n < N && n != i) {
     double x0 = g_x[n];
     double y0 = g_y[n];
     double z0 = g_z[n];
@@ -219,14 +196,17 @@ static __global__ void get_neighbors_of_i(
     float distance_square_i = float(x0i * x0i + y0i * y0i + z0i * z0i);
 
     if (distance_square_i < rc_radial_square) {
-      g_NL_i[atomicAdd(g_NN_i, 1)] = n;
+      int index = atomicAdd(g_NN_i, 1);
+      g_pe_before_local[index] = g_pe_before[n]; 
+      g_NL_i[index] = n;
     }
   }
 }
 
-static __global__ void create_inputs_for_energy_calculator(
-  const int N,
+static __global__ void create_inputs_for_energy_calculator_fastNEP(
+  NEP_Energy_fast::ParaMB paramb,
   const int N_local,
+  const int i,
   const int* atom_local,
   const Box box,
   const float rc_radial_square,
@@ -234,58 +214,77 @@ static __global__ void create_inputs_for_energy_calculator(
   const double* __restrict__ g_x,
   const double* __restrict__ g_y,
   const double* __restrict__ g_z,
-  const int* g_type_before,
-  const int* g_type_after,
-  int* g_NN_radial,
+  const int* g_type,
   int* g_NN_angular,
-  int* g_t2_radial_before,
-  int* g_t2_radial_after,
-  int* g_t2_angular_before,
-  int* g_t2_angular_after,
+  int* g_t2_radial,
   float* g_x12_radial,
   float* g_y12_radial,
   float* g_z12_radial,
-  float* g_x12_angular,
-  float* g_y12_angular,
-  float* g_z12_angular)
+  bool* g_is_neigh_angular,
+  float* g_q_radial,
+  float* g_s_angular,
+  float* g_q_radial_local,
+  float* g_s_angular_local)
 {
-  int n2 = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n2 < N) {
-    double x2 = g_x[n2];
-    double y2 = g_y[n2];
-    double z2 = g_z[n2];
-
-    for (int k = 0; k < N_local; ++k) {
-      int n1 = atom_local[k];
-      if (n1 == n2) {
-        continue;
+  int k = blockIdx.x * blockDim.x + threadIdx.x; // neighbors of the swapped atom i
+  if (k<N_local) {
+    int n1 = atom_local[k];
+    double x2 = g_x[n1];
+    double y2 = g_y[n1];
+    double z2 = g_z[n1];
+    double x12 = x2 - g_x[i];
+    double y12 = y2 - g_y[i];
+    double z12 = z2 - g_z[i];
+    apply_mic(box, x12, y12, z12);
+    float distance_square = float(x12 * x12 + y12 * y12 + z12 * z12);
+    if (distance_square < rc_radial_square) {
+      g_t2_radial[k] = g_type[n1];
+      g_x12_radial[k] = float(x12);
+      g_y12_radial[k] = float(y12);
+      g_z12_radial[k] = float(z12);
+      
+      for (int n = 0; n <= paramb.n_max_radial; ++n){
+        int index, index_local;
+        index_local = k*(paramb.n_max_radial+1) + n;
+        index = n1*(paramb.n_max_radial+1) + n;
+        g_q_radial_local[index_local] = g_q_radial[index];
       }
-      double x12 = x2 - g_x[n1];
-      double y12 = y2 - g_y[n1];
-      double z12 = z2 - g_z[n1];
-      apply_mic(box, x12, y12, z12);
-      float distance_square = float(x12 * x12 + y12 * y12 + z12 * z12);
-      if (distance_square < rc_radial_square) {
-        int count_radial = atomicAdd(&g_NN_radial[k], 1);
-        int index_radial = count_radial * N_local + k;
-        g_t2_radial_before[index_radial] = g_type_before[n2];
-        g_t2_radial_after[index_radial] = g_type_after[n2];
-        g_x12_radial[index_radial] = float(x12);
-        g_y12_radial[index_radial] = float(y12);
-        g_z12_radial[index_radial] = float(z12);
+      
+      for (int n = 0; n <= paramb.n_max_angular; ++n){
+        for (int l = 0; l<NUM_OF_ABC; ++l){
+          int index, index_local;
+          index_local = k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          index =      n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          g_s_angular_local[index_local] = g_s_angular[index];
+        }
       }
       if (distance_square < rc_angular_square) {
-        int count_angular = atomicAdd(&g_NN_angular[k], 1);
-        int index_angular = count_angular * N_local + k;
-        g_t2_angular_before[index_angular] = g_type_before[n2];
-        g_t2_angular_after[index_angular] = g_type_after[n2];
-        g_x12_angular[index_angular] = float(x12);
-        g_y12_angular[index_angular] = float(y12);
-        g_z12_angular[index_angular] = float(z12);
+        g_is_neigh_angular[k] = true;
+      }
+      else {
+        g_is_neigh_angular[k] = false;
       }
     }
   }
+  else if (k = N_local){// central (i) atom
+    for (int n = 0; n <= paramb.n_max_radial; ++n){
+        int index, index_local;
+        index_local = k*(paramb.n_max_radial+1) + n;
+        index = i*(paramb.n_max_radial+1) + n;
+        g_q_radial_local[index_local] = g_q_radial[index];
+      }
+
+    for (int n = 0; n <= paramb.n_max_angular; ++n){
+        for (int l = 0; l<NUM_OF_ABC; ++l){
+          int index, index_local;
+          index_local = k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          index =      i*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          g_s_angular_local[index_local] = g_s_angular[index];
+        }
+      }
+  }
 }
+
 
 // a kernel with a single thread <<<1, 1>>>
 static __global__ void gpu_flip(
@@ -306,7 +305,7 @@ static __global__ void gpu_flip(
   g_vz[i] *= mass_scaler;
 }
 
-bool MC_Ensemble_SGC::allowed_species(std::string& species_found)
+bool MC_Ensemble_SGC_fastNEP::allowed_species(std::string& species_found)
 {
   for (int k = 0; k < species.size(); ++k) {
     if (species[k] == species_found) {
@@ -317,7 +316,7 @@ bool MC_Ensemble_SGC::allowed_species(std::string& species_found)
   return false;
 }
 
-void MC_Ensemble_SGC::compute(
+void MC_Ensemble_SGC_fastNEP::compute(
   int md_step,
   double temperature,
   Atom& atom,
@@ -326,21 +325,23 @@ void MC_Ensemble_SGC::compute(
   int grouping_method,
   int group_id)
 {
-  if (check_if_small_box(nep_energy.paramb.rc_radial, box)) {
+  if (check_if_small_box(nep_energy_fast.paramb.rc_radial, box)) {
     printf("Cannot use small box for MCMD.\n");
     exit(1);
-  }
-
-  if (type_before.size() < atom.number_of_atoms) {
-    type_before.resize(atom.number_of_atoms);
-    type_after.resize(atom.number_of_atoms);
   }
 
   int group_size =
     grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
   std::uniform_int_distribution<int> r1(0, group_size - 1);
 
+  nep_energy_fast.compute_large_box( // compute all descriptors and energy and save it to memeory (nep_data: pe, q_radial, s_angular)
+    box, 
+    atom.type, 
+    atom.position_per_atom);
+
   int num_accepted = 0;
+  int num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
+
   for (int step = 0; step < num_steps_mc; ++step) {
     int i = -1;
     int type_i = -1;
@@ -361,8 +362,10 @@ void MC_Ensemble_SGC::compute(
       type_j = types[index_new_species];
     }
 
-    CHECK(gpuMemset(NN_ij.data(), 0, sizeof(int)));
-    get_neighbors_of_i<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
+    NN_ij.fill(0);
+    pe_before_local.fill(0.0f);
+
+    get_neighbors_of_i_fastNEP<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
       atom.number_of_atoms,
       box,
       i,
@@ -371,96 +374,73 @@ void MC_Ensemble_SGC::compute(
       atom.position_per_atom.data() + atom.number_of_atoms,
       atom.position_per_atom.data() + atom.number_of_atoms * 2,
       NN_ij.data(),
-      NL_ij.data());
+      NL_ij.data(),
+      nep_energy_fast.nep_data.pe.data(),
+      pe_before_local.data());
     GPU_CHECK_KERNEL
 
     int NN_ij_cpu;
     NN_ij.copy_to_host(&NN_ij_cpu);
 
-    get_types<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
-      atom.number_of_atoms, i, type_j, atom.type.data(), type_before.data(), type_after.data());
-    GPU_CHECK_KERNEL
+    gpuMemcpy(&pe_before_local.data()[NN_ij_cpu], &nep_energy_fast.nep_data.pe.data()[i], sizeof(float), gpuMemcpyDeviceToDevice); 
 
-    find_local_types<<<(NN_ij_cpu - 1) / 64 + 1, 64>>>(
-      NN_ij_cpu,
-      NL_ij.data(),
-      type_before.data(),
-      type_after.data(),
-      local_type_before.data(),
-      local_type_after.data());
-    GPU_CHECK_KERNEL
+    NN_angular_i.fill(0);
+    nep_energy_fast.nep_data.q_radial_local.fill(0.0f);
+    nep_energy_fast.nep_data.s_angular_local.fill(0.0f);
+    nep_energy_fast.nep_data.q_radial_i.fill(0.0f);
+    nep_energy_fast.nep_data.s_angular_i.fill(0.0f);
+    is_neigh_angular.fill(false);
 
-    CHECK(gpuMemset(NN_radial.data(), 0, sizeof(int) * NN_radial.size()));
-    CHECK(gpuMemset(NN_angular.data(), 0, sizeof(int) * NN_angular.size()));
-    create_inputs_for_energy_calculator<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
-      atom.number_of_atoms,
+    create_inputs_for_energy_calculator_fastNEP<<<((NN_ij_cpu + 1) - 1) / 64 + 1, 64>>>(// (NN_ij_cpu + 1) due to the fact that array[N_ij_cpu] contain information about central (i) atom
+      nep_energy_fast.paramb,
       NN_ij_cpu,
+      i,
       NL_ij.data(),
       box,
-      nep_energy.paramb.rc_radial * nep_energy.paramb.rc_radial,
-      nep_energy.paramb.rc_angular * nep_energy.paramb.rc_angular,
+      nep_energy_fast.paramb.rc_radial * nep_energy.paramb.rc_radial,
+      nep_energy_fast.paramb.rc_angular * nep_energy.paramb.rc_angular,
       atom.position_per_atom.data(),
-      atom.position_per_atom.data() + atom.number_of_atoms,
-      atom.position_per_atom.data() + atom.number_of_atoms * 2,
-      type_before.data(),
-      type_after.data(),
-      NN_radial.data(),
-      NN_angular.data(),
-      t2_radial_before.data(),
-      t2_radial_after.data(),
-      t2_angular_before.data(),
-      t2_angular_after.data(),
+      atom.position_per_atom.data() + atom.number_of_atoms, 
+      atom.position_per_atom.data() + atom.number_of_atoms * 2, 
+      atom.type.data(),
+      NN_angular_i.data(),
+      t2_radial.data(),
       x12_radial.data(),
       y12_radial.data(),
       z12_radial.data(),
-      x12_angular.data(),
-      y12_angular.data(),
-      z12_angular.data());
+      is_neigh_angular.data(),
+      nep_energy_fast.nep_data.q_radial.data(),
+      nep_energy_fast.nep_data.s_angular.data(),
+      nep_energy_fast.nep_data.q_radial_local.data(),
+      nep_energy_fast.nep_data.s_angular_local.data());
     GPU_CHECK_KERNEL
+    
+    nep_energy_fast.nep_data.q_radial_trial_local.fill(0.0f);
+    nep_energy_fast.nep_data.s_angular_trial_local.fill(0.0f);
 
-    nep_energy.find_energy(
+    nep_energy_fast.find_energy( // calculate energy differences for neighbors of th central (i) atom after MC trial swap: delta_pe
       NN_ij_cpu,
-      NN_radial.data(),
-      NN_angular.data(),
-      local_type_before.data(),
-      t2_radial_before.data(),
-      t2_angular_before.data(),
+      i,
+      NN_angular_i.data(),
+      type_i,
+      type_j,
+      t2_radial.data(),
       x12_radial.data(),
       y12_radial.data(),
       z12_radial.data(),
-      x12_angular.data(),
-      y12_angular.data(),
-      z12_angular.data(),
-      pe_before.data());
+      is_neigh_angular.data(),
+      delta_pe.data(),
+      pe_before_local.data());
+    
+    std::vector<float> delta_pe_cpu(NN_ij_cpu+1);
+    delta_pe.copy_to_host(delta_pe_cpu.data(), NN_ij_cpu+1);
 
-    nep_energy.find_energy(
-      NN_ij_cpu,
-      NN_radial.data(),
-      NN_angular.data(),
-      local_type_after.data(),
-      t2_radial_after.data(),
-      t2_angular_after.data(),
-      x12_radial.data(),
-      y12_radial.data(),
-      z12_radial.data(),
-      x12_angular.data(),
-      y12_angular.data(),
-      z12_angular.data(),
-      pe_after.data());
-
-    std::vector<float> pe_before_cpu(NN_ij_cpu);
-    std::vector<float> pe_after_cpu(NN_ij_cpu);
-    pe_before.copy_to_host(pe_before_cpu.data(), NN_ij_cpu);
-    pe_after.copy_to_host(pe_after_cpu.data(), NN_ij_cpu);
-    float pe_before_total = 0.0f;
-    float pe_after_total = 0.0f;
+    float energy_difference = 0.0f;
     for (int n = 0; n < NN_ij_cpu; ++n) {
-      pe_before_total += pe_before_cpu[n];
-      pe_after_total += pe_after_cpu[n];
+      energy_difference += delta_pe_cpu[n];
     }
-    // printf("        per-atom energy before swapping = %g eV.\n", pe_before_total / NN_ij_cpu);
-    // printf("        per-atom energy after swapping = %g eV.\n", pe_after_total / NN_ij_cpu);
-    float energy_difference = pe_after_total - pe_before_total;
+    energy_difference += delta_pe_cpu[NN_ij_cpu]; // delta energy of the central (i) atom
+    //mc_output << i << "; " << type_i << "; " << type_j << "; " << energy_difference << std::endl; // for debugging
 
     if (!is_vcsgc) {
       energy_difference += mu_or_phi[index_new_species] - mu_or_phi[index_old_species];
@@ -474,7 +454,7 @@ void MC_Ensemble_SGC::compute(
     std::uniform_real_distribution<float> r2(0, 1);
     float random_number = r2(rng);
     float probability = exp(-energy_difference / (K_B * temperature));
-
+    
     if (random_number < probability) {
       ++num_accepted;
 
@@ -497,6 +477,12 @@ void MC_Ensemble_SGC::compute(
         atom.velocity_per_atom.data(),
         atom.velocity_per_atom.data() + atom.number_of_atoms,
         atom.velocity_per_atom.data() + atom.number_of_atoms * 2);
+
+      nep_energy_fast.accept_trial( // update stored values of descriptors and potential energies
+        NN_ij_cpu, 
+        NL_ij.data(),
+        delta_pe.data(),
+        i);
     }
   }
 

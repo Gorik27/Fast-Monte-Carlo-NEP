@@ -74,8 +74,8 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param)
   mc_output << "\n";
   mc_output << "# num_MD_steps  acceptance_ratio [species_concentrations]" << std::endl;
 
-  const int n_max = 1000;
-  const int m_max = 1000;
+  //const int n_max = 1000;
+  //const int m_max = 1000;
   NN_radial.resize(n_max);
   NN_angular.resize(n_max);
   local_type_before.resize(n_max);
@@ -96,6 +96,50 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param)
   std::string potential_file_name = get_potential_file_name();
   check_is_nep(potential_file_name);
   nep_energy.initialize(potential_file_name.c_str());
+
+#ifdef DEBUG
+  rng = std::mt19937(13579);
+#else
+  rng = std::mt19937(std::chrono::system_clock::now().time_since_epoch().count());
+#endif
+}
+
+MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms)// overload in order to provide number of atoms to NEP_fast initialisation
+{
+  mc_output.open("mcmd.out", std::ios::app);
+  mc_output << "# ";
+  for (int n = 0; n < num_param; ++n) {
+    mc_output << param[n] << " ";
+  }
+  mc_output << "\n";
+  mc_output << "# num_MD_steps  acceptance_ratio [species_concentrations]" << std::endl;
+
+  //const int n_max = 1000;
+  //const int m_max = 1000;
+  NN_radial.resize(n_max);
+  NN_angular.resize(n_max);
+  local_type_before.resize(n_max);
+  local_type_after.resize(n_max);
+  t2_radial_before.resize(n_max * m_max);
+  t2_radial_after.resize(n_max * m_max);
+  t2_angular_before.resize(n_max * m_max);
+  t2_angular_after.resize(n_max * m_max);
+  x12_radial.resize(n_max * m_max);
+  y12_radial.resize(n_max * m_max);
+  z12_radial.resize(n_max * m_max);
+  x12_angular.resize(n_max * m_max);
+  y12_angular.resize(n_max * m_max);
+  z12_angular.resize(n_max * m_max);
+  pe_before.resize(n_max);
+  pe_after.resize(n_max);
+
+  std::string potential_file_name = get_potential_file_name();
+  check_is_nep(potential_file_name);
+  nep_energy_fast.initialize(
+    potential_file_name.c_str(), 
+    num_atoms, 
+    n_max, 
+    m_max);
 
 #ifdef DEBUG
   rng = std::mt19937(13579);
