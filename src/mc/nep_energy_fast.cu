@@ -534,6 +534,8 @@ static __global__ void find_energy_zbl(
     int type2 = g_t2_angular[n1];
     int zj = zbl.atomic_numbers[type2];
 
+    // TODO потенциал несимметричен относительно i <-> j. надо это учесть!!
+
     //after trial step
     int type1 = t1_after;
     int zi = zbl.atomic_numbers[type1];

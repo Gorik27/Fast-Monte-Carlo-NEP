@@ -50,6 +50,9 @@ protected:
   std::mt19937 rng;
 
   std::ofstream mc_output;
+  #ifdef DEBUG
+    std::ofstream mc_debug_log;
+  #endif
 
   GPU_Vector<int> NN_radial;
   GPU_Vector<int> NN_angular;

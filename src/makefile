@@ -8,6 +8,8 @@
 #    You can consider removing -Xcompiler "/wd 4819"
 # 3) Add -DUSE_PLUMED to CFLAGS when use the PLUMED plugin
 #    and remove it otherwise.
+# 4) Add -DUSE_TABLE to speed up MD simulations with NEP
+#    using pre-computed radial functions in the descriptors
 ###########################################################
 
 
@@ -15,11 +17,11 @@
 # some flags
 ###########################################################
 CC = nvcc
-CUDA_ARCH=-arch=sm_60
+CUDA_ARCH=-arch=sm_120
 ifdef OS # For Windows with the cl.exe compiler
 CFLAGS = -O3 $(CUDA_ARCH)
 else # For linux
-CFLAGS = -std=c++14 -O3 $(CUDA_ARCH)
+CFLAGS = -std=c++17 -ccbin /usr/bin/gcc-11 -O3 $(CUDA_ARCH) -DDEBUG -DFAST_NEP_MC_TEST #  -g -G # -DDEBUG
 endif
 INC = -I./
 LDFLAGS = 
@@ -82,6 +84,11 @@ HEADERS =                         \
 # executables
 ###########################################################
 all: gpumd nep 
+gpumd_dev: $(OBJ_GPUMD)
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+	@echo =================================================
+	@echo The gpumd_dev executable is successfully compiled!
+	@echo =================================================
 gpumd: $(OBJ_GPUMD)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 	@echo =================================================
@@ -158,6 +165,6 @@ clean:
 ifdef OS
 	del /s *.obj *.exp *.lib *.exe
 else
-	rm -f */*.o gpumd nep gnep
+	rm -f */*.o gpumd nep gnep gpumd_dev
 endif
 

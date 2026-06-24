@@ -29,6 +29,12 @@ The driver class for the various MC ensembles.
 
 void MC::initialize(void)
 {
+  #ifdef FAST_NEP_MC_TEST
+    printf("FAST_NEP_MC_TEST is on: the MC SGC ensemble uses a constant acceptance probability (p=0.5), and debug files are generated to compare the fastNEP and original implementations.\n");
+    #ifndef DEBUG
+      printf("WARNING: FAST_NEP_MC_TEST should only be used with the DEBUG flag enabled.\n");
+    #endif
+  #endif
   // todo
 }
 

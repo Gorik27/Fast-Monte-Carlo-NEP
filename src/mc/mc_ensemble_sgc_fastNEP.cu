@@ -344,6 +344,11 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
   int num_accepted = 0;
   int num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
+  
+  #ifdef FAST_NEP_MC_TEST
+    mc_debug_log << "# VCSGC fastNEP; number of micro MC steps: " << num_steps_mc << std::endl;
+    mc_debug_log << "# i; type_i; type_j; energy_difference" << std::endl;
+  #endif
 
   for (int step = 0; step < num_steps_mc; ++step) {
     int i = -1;
@@ -372,7 +377,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
       atom.number_of_atoms,
       box,
       i,
-      nep_energy.paramb.rc_radial * nep_energy.paramb.rc_radial,
+      nep_energy_fast.paramb.rc_radial * nep_energy_fast.paramb.rc_radial,
       atom.position_per_atom.data(),
       atom.position_per_atom.data() + atom.number_of_atoms,
       atom.position_per_atom.data() + atom.number_of_atoms * 2,
@@ -400,8 +405,8 @@ void MC_Ensemble_SGC_fastNEP::compute(
       i,
       NL_ij.data(),
       box,
-      nep_energy_fast.paramb.rc_radial * nep_energy.paramb.rc_radial,
-      nep_energy_fast.paramb.rc_angular * nep_energy.paramb.rc_angular,
+      nep_energy_fast.paramb.rc_radial * nep_energy_fast.paramb.rc_radial,
+      nep_energy_fast.paramb.rc_angular * nep_energy_fast.paramb.rc_angular,
       atom.position_per_atom.data(),
       atom.position_per_atom.data() + atom.number_of_atoms, 
       atom.position_per_atom.data() + atom.number_of_atoms * 2, 
@@ -445,7 +450,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
       energy_difference += delta_pe_nep_cpu[n];
     }
     energy_difference += delta_pe_nep_cpu[NN_ij_cpu]; // delta energy of the central (i) atom
-    //mc_output << i << "; " << type_i << "; " << type_j << "; " << energy_difference << std::endl; // for debugging
 
     std::vector<float> delta_pe_zbl_cpu(NN_ij_cpu);
     delta_pe_zbl.copy_to_host(delta_pe_zbl_cpu.data(), NN_ij_cpu);
@@ -453,6 +457,10 @@ void MC_Ensemble_SGC_fastNEP::compute(
     for (int n = 0; n < NN_ij_cpu; ++n) {
       energy_difference += delta_pe_zbl_cpu[n];
     }
+
+    #ifdef FAST_NEP_MC_TEST
+      mc_debug_log << i << "; " << type_i << "; " << type_j << "; " << energy_difference  << std::endl;
+    #endif
 
     if (!is_vcsgc) {
       energy_difference += mu_or_phi[index_new_species] - mu_or_phi[index_old_species];
@@ -466,6 +474,9 @@ void MC_Ensemble_SGC_fastNEP::compute(
     std::uniform_real_distribution<float> r2(0, 1);
     float random_number = r2(rng);
     float probability = exp(-energy_difference / (K_B * temperature));
+    #ifdef FAST_NEP_MC_TEST
+      probability = 0.5;
+    #endif
     
     if (random_number < probability) {
       ++num_accepted;

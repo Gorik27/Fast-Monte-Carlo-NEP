@@ -74,6 +74,11 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param)
   mc_output << "\n";
   mc_output << "# num_MD_steps  acceptance_ratio [species_concentrations]" << std::endl;
 
+  #ifdef DEBUG
+    mc_debug_log.open("mcmd_debug.log", std::ios::app);
+    mc_debug_log << "# log for debugging" << std::endl;
+  #endif
+
   //const int n_max = 1000;
   //const int m_max = 1000;
   NN_radial.resize(n_max);
@@ -113,6 +118,11 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms)
   }
   mc_output << "\n";
   mc_output << "# num_MD_steps  acceptance_ratio [species_concentrations]" << std::endl;
+
+  #ifdef DEBUG
+    mc_debug_log.open("mcmd_debug.log", std::ios::app);
+    mc_debug_log << "# log for debugging" << std::endl;
+  #endif
 
   //const int n_max = 1000;
   //const int m_max = 1000;
