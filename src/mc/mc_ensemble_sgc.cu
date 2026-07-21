@@ -476,8 +476,8 @@ void MC_Ensemble_SGC::compute(
     } else {
       energy_difference +=
         kappa * K_B * temperature * 
-        ((mu_or_phi[index_new_species] - mu_or_phi[index_old_species]) +
-         (2.0 * num_atoms_species[index_new_species]  + 1.0)/group_size);
+        (group_size * (mu_or_phi[index_new_species] - mu_or_phi[index_old_species]) +
+         (2.0 * num_atoms_species[index_new_species]  + 1.0));
     }
 
     std::uniform_real_distribution<float> r2(0, 1);
