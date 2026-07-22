@@ -466,10 +466,11 @@ void MC_Ensemble_SGC_fastNEP::compute(
       energy_difference += mu_or_phi[index_new_species] - mu_or_phi[index_old_species];
     } else {
       energy_difference +=
-        kappa * K_B * temperature / group_size *
+        kappa * K_B * temperature * 
         (group_size * (mu_or_phi[index_new_species] - mu_or_phi[index_old_species]) +
-         2 * (num_atoms_species[index_new_species] - num_atoms_species[index_old_species]) + 1.0);
+         (2.0 * num_atoms_species[index_new_species]  + 1.0));
     }
+    
 
     std::uniform_real_distribution<float> r2(0, 1);
     float random_number = r2(rng);
