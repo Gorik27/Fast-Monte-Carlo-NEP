@@ -403,6 +403,10 @@ void MC_Ensemble_SGC_fastNEP::compute(
     nep_energy_fast.nep_data.s_angular_i.fill(0.0f);
     is_neigh_angular.fill(false);
 
+    t2_radial.fill(0);
+    x12_radial.fill(0.0f);
+    y12_radial.fill(0.0f);
+    z12_radial.fill(0.0f);
     create_inputs_for_energy_calculator_fastNEP<<<((NN_ij_cpu + 1) - 1) / 64 + 1, 64>>>(// (NN_ij_cpu + 1) due to the fact that array[N_ij_cpu] contain information about central (i) atom
       nep_energy_fast.paramb,
       NN_ij_cpu,
