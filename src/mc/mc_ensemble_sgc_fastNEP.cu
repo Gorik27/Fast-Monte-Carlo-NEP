@@ -342,6 +342,10 @@ void MC_Ensemble_SGC_fastNEP::compute(
     atom.type, 
     atom.position_per_atom);
 
+  nep_energy_fast.find_subdomain_list(
+    box,
+    atom.position_per_atom);// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
+
   int num_accepted = 0;
   int num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
   

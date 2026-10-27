@@ -31,6 +31,8 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include <string>
 #include <vector>
 #include <cstring>
+#include <thrust/execution_policy.h>
+#include <thrust/scan.h>
 
 const std::string ELEMENTS[NUM_ELEMENTS] = {
   "H",  "He", "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Ne", "Na", "Mg", "Al", "Si", "P",  "S",
@@ -292,6 +294,11 @@ void NEP_Energy_fast::initialize(
   nep_data.q_radial_trial_local.resize(nep_data.q_radial_local_size); // radial descriptors of the MC swappad atom after MC swap
   nep_data.s_angular_trial_local.resize(nep_data.s_angular_local_size); // angular descriptors of the MC swappad atom after MC swap
   nep_data.pe_nep.resize(num_atoms); // potential energies
+  nep_data.num_domains.resize(3);
+  nep_data.subdomain_inv_size.resize(3);
+  nep_data.cell_count.resize(num_atoms);
+  nep_data.cell_count_sum.resize(num_atoms);
+  nep_data.cell_contents.resize(num_atoms);
 }
 
 NEP_Energy_fast::NEP_Energy_fast(void)
@@ -1101,3 +1108,205 @@ void NEP_Energy_fast::compute_large_box( // based on force/nep.cu
     nep_data.s_angular.data());
   GPU_CHECK_KERNEL
 }
+
+// a kernel with a single thread <<<1, 1>>>
+static __global__ void find_subdomain_inv_size(
+  const int* __restrict__ g_num_domains,
+  double* __restrict__ subdomain_inv_size,
+  const Box box,
+  const double rc_radial // TODO: проверить, не передается ли это число с CPU на GPU и не тормозит ли это
+)
+{
+  subdomain_inv_size[0] = static_cast<double>(g_num_domains[0]*2) / box.thickness_x;
+  if (subdomain_inv_size[0]*rc_radial*2>1.0){
+    std::cout << "Domain dimention along each axis must be larger then 4 cutoff radius!" << std::endl;
+    exit(1);
+  } 
+  subdomain_inv_size[1] = static_cast<double>(g_num_domains[1]*2) / box.thickness_y;
+    if (subdomain_inv_size[1]*rc_radial*2>1.0){
+    std::cout << "Domain dimention along each axis must be larger then 4 cutoff radius!" << std::endl;
+    exit(1);
+  } 
+  subdomain_inv_size[2] = static_cast<double>(g_num_domains[2]*2) / box.thickness_z;
+    if (subdomain_inv_size[2]*rc_radial*2>1.0){
+    std::cout << "Domain dimention along each axis must be larger then 4 cutoff radius!" << std::endl;
+    exit(1);
+  } 
+}
+
+static __global__ void find_subdomain_counts(
+  const Box box,
+  const int N,
+  int* subdomain_count,
+  int* subdomain_class,
+  const double* x,
+  const double* y,
+  const double* z,
+  const int nx,
+  const int ny,
+  const int nz,
+  const double lx_inv,
+  const double ly_inv,
+  const double lz_inv)
+{
+  const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n1 < N) {
+    int subdomain_id, _subdomain_class;
+    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id, _subdomain_class);
+    int old_count = atomicAdd(&subdomain_count[subdomain_id], 1);
+    if (old_count == 0) {
+        subdomain_class[subdomain_id] = _subdomain_class;
+    }
+  }
+}
+
+static __global__ void find_subdomain_contents(
+  const Box box,
+  const int N,
+  int* subdomain_count,
+  const int* subdomain_count_sum,
+  int* subdomain_contents,
+  const double* x,
+  const double* y,
+  const double* z,
+  const int nx,
+  const int ny,
+  const int nz,
+  const double lx_inv,
+  const double ly_inv,
+  const double lz_inv)
+{
+  const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n1 < N) {
+    int subdomain_id, subdomain_class;
+    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id, subdomain_class);
+    const int ind = atomicAdd(&subdomain_count[subdomain_id], 1);
+    subdomain_contents[subdomain_count_sum[subdomain_id] + ind] = n1;
+  }
+}
+
+static __device__ void find_subdomain_id(
+  const Box& box,
+  const double x,
+  const double y,
+  const double z,
+  const double lx_inv,
+  const double ly_inv,
+  const double lz_inv,
+  const int nx,
+  const int ny,
+  const int nz,
+  int& subdomain_id,
+  int& subdomain_class
+)
+{
+  int subdomain_id_x, subdomain_id_y, subdomain_id_z;
+  find_subdomain_id(box, x, y, z, lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
+  int px = subdomain_id_x%2;
+  int py = subdomain_id_y%2;
+  int pz = subdomain_id_z%2;
+  subdomain_class = px*4 + py*2 + pz;
+}
+
+static __device__ void find_subdomain_id(
+  const Box& box,
+  const double x,
+  const double y,
+  const double z,
+  const double lx_inv,
+  const double ly_inv,
+  const double lz_inv,
+  const int nx,
+  const int ny,
+  const int nz,
+  int& subdomain_id_x,
+  int& subdomain_id_y,
+  int& subdomain_id_z,
+  int& subdomain_id)
+{
+  const double sx = box.cpu_h[9] * x + box.cpu_h[10] * y + box.cpu_h[11] * z;
+  const double sy = box.cpu_h[12] * x + box.cpu_h[13] * y + box.cpu_h[14] * z;
+  const double sz = box.cpu_h[15] * x + box.cpu_h[16] * y + box.cpu_h[17] * z;
+  subdomain_id_x = floor(sx * box.thickness_x * lx_inv);
+  subdomain_id_y = floor(sy * box.thickness_y * ly_inv);
+  subdomain_id_z = floor(sz * box.thickness_z * lz_inv);
+
+  while (subdomain_id_x < 0)
+    subdomain_id_x += nx;
+  while (subdomain_id_x >= nx)
+    subdomain_id_x -= nx;
+  while (subdomain_id_y < 0)
+    subdomain_id_y += ny;
+  while (subdomain_id_y >= ny)
+    subdomain_id_y -= ny;
+  while (subdomain_id_z < 0)
+    subdomain_id_z += nz;
+  while (subdomain_id_z >= nz)
+    subdomain_id_z -= nz;
+  subdomain_id = subdomain_id_x + nx * subdomain_id_y + nx * ny * subdomain_id_z;
+}
+
+void NEP_Energy_fast::find_subdomain_list(
+    const Box& box,
+    const GPU_Vector<double>& position_per_atom){
+      find_subdomain_inv_size<<<1, 1>>>(nep_data.num_domains.data(), nep_data.subdomain_inv_size.data(), box, paramb.rc_radial);
+
+      const int N = position_per_atom.size() / 3;
+      const int block_size = 256;
+      const int grid_size = (N - 1) / block_size + 1;
+
+      const double* x = position_per_atom.data();
+      const double* y = position_per_atom.data() + N;
+      const double* z = position_per_atom.data() + N * 2;
+      const int N_subdomains = nep_data.num_domains[0] * nep_data.num_domains[1] * nep_data.num_domains[2];
+
+      // number of domains is allowed to be larger than the number of atoms
+      if (N_subdomains > nep_data.subdomain_count.size()) {
+        nep_data.subdomain_count.resize(N_subdomains);
+        nep_data.subdomain_class.resize(N_subdomains);
+        nep_data.subdomain_count_sum.resize(N_subdomains);
+      }
+
+      CHECK(gpuMemset(nep_data.subdomain_count.data(), 0, sizeof(int) * N_subdomains));
+      CHECK(gpuMemset(nep_data.subdomain_class.data(), 0, sizeof(int) * N_subdomains));
+      CHECK(gpuMemset(nep_data.subdomain_count_sum.data(), 0, sizeof(int) * N_subdomains));
+      CHECK(gpuMemset(nep_data.subdomain_contents.data(), 0, sizeof(int) * N));
+
+      find_subdomain_counts<<<grid_size, block_size>>>(
+        box, 
+        N, 
+        nep_data.subdomain_count.data(), 
+        nep_data.subdomain_class.data(),
+        x, 
+        y, 
+        z, 
+        nep_data.num_domains[0], 
+        nep_data.num_domains[1], 
+        nep_data.num_domains[2],
+        nep_data.subdomain_inv_size[0],
+        nep_data.subdomain_inv_size[1],
+        nep_data.subdomain_inv_size[2]);
+      GPU_CHECK_KERNEL
+
+      thrust::exclusive_scan(
+        thrust::device, nep_data.subdomain_count.data(), nep_data.subdomain_count.data() + N_subdomains, nep_data.subdomain_count_sum.data());
+
+      CHECK(gpuMemset(nep_data.subdomain_count.data(), 0, sizeof(int) * N_subdomains));
+
+      find_subdomain_contents<<<grid_size, block_size>>>(
+        box,
+        N,
+        nep_data.subdomain_count.data(),
+        nep_data.subdomain_count_sum.data(),
+        nep_data.subdomain_contents.data(),
+        x,
+        y,
+        z,
+        nep_data.num_domains[0],
+        nep_data.num_domains[1],
+        nep_data.num_domains[2],
+        nep_data.subdomain_inv_size[0],
+        nep_data.subdomain_inv_size[1],
+        nep_data.subdomain_inv_size[2]);
+      GPU_CHECK_KERNEL
+    }

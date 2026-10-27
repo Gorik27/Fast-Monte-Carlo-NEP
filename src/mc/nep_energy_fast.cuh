@@ -47,6 +47,13 @@ struct NEP_Fast_Data {
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
   GPU_Vector<float> pe_nep;
+  GPU_Vector<int> num_domains;
+  GPU_Vector<double> subdomain_inv_size;
+  GPU_Vector<int> subdomain_count;
+  GPU_Vector<int> subdomain_class;
+  GPU_Vector<int> subdomain_count_sum;
+  GPU_Vector<int> subdomain_contents;
+
 #ifdef USE_TABLE
   GPU_Vector<float> gn_radial;   // tabulated gn_radial functions
   GPU_Vector<float> gnp_radial;  // tabulated gnp_radial functions
@@ -141,6 +148,10 @@ public:
       float* g_delta_pe_nep,
       float* g_pe_nep,
       float* g_delta_pe_zbl);
+
+  void find_subdomain_list(
+    const Box& box,
+    const GPU_Vector<double>& position_per_atom);
 
   void compute_large_box(
     Box& box,

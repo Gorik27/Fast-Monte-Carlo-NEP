@@ -84,10 +84,10 @@ HEADERS =                         \
 # executables
 ###########################################################
 all: gpumd nep 
-gpumd_dev: $(OBJ_GPUMD)
+gpumd_parallel: $(OBJ_GPUMD)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 	@echo =================================================
-	@echo The gpumd_dev executable is successfully compiled!
+	@echo The gpumd_parallel executable is successfully compiled!
 	@echo =================================================
 gpumd: $(OBJ_GPUMD)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
@@ -165,6 +165,6 @@ clean:
 ifdef OS
 	del /s *.obj *.exp *.lib *.exe
 else
-	rm -f */*.o gpumd nep gnep gpumd_dev
+	rm -f */*.o gpumd nep gnep gpumd_parallel
 endif
 
