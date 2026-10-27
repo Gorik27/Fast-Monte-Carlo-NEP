@@ -269,7 +269,7 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
       }
     }
   }
-  else if (k = N_local){// central (i) atom
+  else if (k == N_local){// central (i) atom
     for (int n = 0; n <= paramb.n_max_radial; ++n){
         int index, index_local;
         index_local = k*(paramb.n_max_radial+1) + n;
