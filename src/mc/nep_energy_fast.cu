@@ -545,7 +545,7 @@ static __global__ void find_energy_zbl(
 {
   int thread = blockIdx.x * blockDim.x + threadIdx.x;
   int n1 = thread/N_domains;
-  int domain = thread%domain;
+  int domain = thread% N_domains;
   if (n1 < num_in_domain[domain]) {
     float r12[3] = {g_x12[thread], g_y12[thread], g_z12[thread]};
     float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
@@ -1147,20 +1147,81 @@ static __global__ void find_subdomain_inv_size(
 )
 {
   subdomain_inv_size[0] = static_cast<double>(g_num_domains[0]*2) / box.thickness_x;
-  if (subdomain_inv_size[0]*rc_radial*2>1.0){
+/*   if (subdomain_inv_size[0]*rc_radial*2>1.0){ //TODO перенести на хост
     std::cout << "Domain dimention along each axis must be larger then 4 cutoff radius!" << std::endl;
     exit(1);
-  } 
+  }  */
   subdomain_inv_size[1] = static_cast<double>(g_num_domains[1]*2) / box.thickness_y;
-    if (subdomain_inv_size[1]*rc_radial*2>1.0){
+/*     if (subdomain_inv_size[1]*rc_radial*2>1.0){
     std::cout << "Domain dimention along each axis must be larger then 4 cutoff radius!" << std::endl;
     exit(1);
-  } 
+  }  */
   subdomain_inv_size[2] = static_cast<double>(g_num_domains[2]*2) / box.thickness_z;
-    if (subdomain_inv_size[2]*rc_radial*2>1.0){
+/*     if (subdomain_inv_size[2]*rc_radial*2>1.0){
     std::cout << "Domain dimention along each axis must be larger then 4 cutoff radius!" << std::endl;
     exit(1);
-  } 
+  }  */
+}
+
+static __device__ void find_subdomain_id(
+  const Box& box,
+  const double x,
+  const double y,
+  const double z,
+  const double lx_inv,
+  const double ly_inv,
+  const double lz_inv,
+  const int nx,
+  const int ny,
+  const int nz,
+  int& subdomain_id_x,
+  int& subdomain_id_y,
+  int& subdomain_id_z,
+  int& subdomain_id)
+{
+  const double sx = box.cpu_h[9] * x + box.cpu_h[10] * y + box.cpu_h[11] * z;
+  const double sy = box.cpu_h[12] * x + box.cpu_h[13] * y + box.cpu_h[14] * z;
+  const double sz = box.cpu_h[15] * x + box.cpu_h[16] * y + box.cpu_h[17] * z;
+  subdomain_id_x = floor(sx * box.thickness_x * lx_inv);
+  subdomain_id_y = floor(sy * box.thickness_y * ly_inv);
+  subdomain_id_z = floor(sz * box.thickness_z * lz_inv);
+
+  while (subdomain_id_x < 0)
+    subdomain_id_x += nx;
+  while (subdomain_id_x >= nx)
+    subdomain_id_x -= nx;
+  while (subdomain_id_y < 0)
+    subdomain_id_y += ny;
+  while (subdomain_id_y >= ny)
+    subdomain_id_y -= ny;
+  while (subdomain_id_z < 0)
+    subdomain_id_z += nz;
+  while (subdomain_id_z >= nz)
+    subdomain_id_z -= nz;
+  subdomain_id = subdomain_id_x + nx * subdomain_id_y + nx * ny * subdomain_id_z;
+}
+
+static __device__ void find_subdomain_id(
+  const Box& box,
+  const double x,
+  const double y,
+  const double z,
+  const double lx_inv,
+  const double ly_inv,
+  const double lz_inv,
+  const int nx,
+  const int ny,
+  const int nz,
+  int& subdomain_id,
+  int& subdomain_color
+)
+{
+  int subdomain_id_x, subdomain_id_y, subdomain_id_z;
+  find_subdomain_id(box, x, y, z, lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
+  int px = subdomain_id_x%2;
+  int py = subdomain_id_y%2;
+  int pz = subdomain_id_z%2;
+  subdomain_color = px*4 + py*2 + pz;
 }
 
 static __global__ void find_subdomain_counts(
@@ -1214,66 +1275,9 @@ static __global__ void find_subdomain_contents(
   }
 }
 
-static __device__ void find_subdomain_id(
-  const Box& box,
-  const double x,
-  const double y,
-  const double z,
-  const double lx_inv,
-  const double ly_inv,
-  const double lz_inv,
-  const int nx,
-  const int ny,
-  const int nz,
-  int& subdomain_id,
-  int& subdomain_color
-)
-{
-  int subdomain_id_x, subdomain_id_y, subdomain_id_z;
-  find_subdomain_id(box, x, y, z, lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
-  int px = subdomain_id_x%2;
-  int py = subdomain_id_y%2;
-  int pz = subdomain_id_z%2;
-  subdomain_color = px*4 + py*2 + pz;
-}
 
-static __device__ void find_subdomain_id(
-  const Box& box,
-  const double x,
-  const double y,
-  const double z,
-  const double lx_inv,
-  const double ly_inv,
-  const double lz_inv,
-  const int nx,
-  const int ny,
-  const int nz,
-  int& subdomain_id_x,
-  int& subdomain_id_y,
-  int& subdomain_id_z,
-  int& subdomain_id)
-{
-  const double sx = box.cpu_h[9] * x + box.cpu_h[10] * y + box.cpu_h[11] * z;
-  const double sy = box.cpu_h[12] * x + box.cpu_h[13] * y + box.cpu_h[14] * z;
-  const double sz = box.cpu_h[15] * x + box.cpu_h[16] * y + box.cpu_h[17] * z;
-  subdomain_id_x = floor(sx * box.thickness_x * lx_inv);
-  subdomain_id_y = floor(sy * box.thickness_y * ly_inv);
-  subdomain_id_z = floor(sz * box.thickness_z * lz_inv);
 
-  while (subdomain_id_x < 0)
-    subdomain_id_x += nx;
-  while (subdomain_id_x >= nx)
-    subdomain_id_x -= nx;
-  while (subdomain_id_y < 0)
-    subdomain_id_y += ny;
-  while (subdomain_id_y >= ny)
-    subdomain_id_y -= ny;
-  while (subdomain_id_z < 0)
-    subdomain_id_z += nz;
-  while (subdomain_id_z >= nz)
-    subdomain_id_z -= nz;
-  subdomain_id = subdomain_id_x + nx * subdomain_id_y + nx * ny * subdomain_id_z;
-}
+
 
 void NEP_Energy_fast::find_subdomain_list(
     const Box& box,
