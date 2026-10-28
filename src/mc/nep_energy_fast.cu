@@ -33,6 +33,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include <cstring>
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
+#include <numeric>
 
 const std::string ELEMENTS[NUM_ELEMENTS] = {
   "H",  "He", "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Ne", "Na", "Mg", "Al", "Si", "P",  "S",
@@ -46,7 +47,8 @@ void NEP_Energy_fast::initialize(
   const char* file_potential, 
   const int num_atoms, 
   const int n_max, 
-  const int m_max)
+  const int m_max,
+  const int N_domains)
 {
 
   std::ifstream input(file_potential);
@@ -283,22 +285,21 @@ void NEP_Energy_fast::initialize(
   nep_data.cell_contents.resize(num_atoms);
   nep_data.cpu_NN_radial.resize(num_atoms);
   nep_data.cpu_NN_angular.resize(num_atoms);
-  nep_data.q_radial.resize(num_atoms * (paramb.n_max_radial + 1)); // radial descriptors
+  nep_data.q_radial.resize(num_atoms * (paramb.n_max_radial + 1) ); // radial descriptors
   nep_data.s_angular.resize(num_atoms * (paramb.n_max_angular + 1) * NUM_OF_ABC); // angular descriptors (S values)
-  nep_data.q_radial_local_size = n_max * (paramb.n_max_radial + 1); 
-  nep_data.s_angular_local_size = m_max * (paramb.n_max_angular + 1) * NUM_OF_ABC;
+  nep_data.q_radial_local_size = n_max * (paramb.n_max_radial + 1) * N_domains; 
+  nep_data.s_angular_local_size = m_max * (paramb.n_max_angular + 1) * NUM_OF_ABC * N_domains;
   nep_data.q_radial_local.resize(nep_data.q_radial_local_size); // radial descriptors of neighbors of the MC swappad atom
   nep_data.s_angular_local.resize(nep_data.s_angular_local_size); // angular descriptors of neighbors of the MC swappad atom
   nep_data.q_radial_i.resize(nep_data.q_radial_local_size); // radial descriptors of the MC swappad atom
   nep_data.s_angular_i.resize(nep_data.s_angular_local_size); // angular descriptors of the MC swappad atom
   nep_data.q_radial_trial_local.resize(nep_data.q_radial_local_size); // radial descriptors of the MC swappad atom after MC swap
   nep_data.s_angular_trial_local.resize(nep_data.s_angular_local_size); // angular descriptors of the MC swappad atom after MC swap
-  nep_data.pe_nep.resize(num_atoms); // potential energies
   nep_data.num_domains.resize(3);
   nep_data.subdomain_inv_size.resize(3);
-  nep_data.cell_count.resize(num_atoms);
-  nep_data.cell_count_sum.resize(num_atoms);
-  nep_data.cell_contents.resize(num_atoms);
+  nep_data.subdomain_count.resize(N_domains);
+  nep_data.subdomain_count_sum.resize(N_domains);
+  nep_data.subdomain_contents.resize(N_domains);
 }
 
 NEP_Energy_fast::NEP_Energy_fast(void)
@@ -335,10 +336,11 @@ void NEP_Energy_fast::update_potential(float* parameters, ANN& ann)
 static __global__ void find_energy_nep(
   NEP_Energy_fast::ParaMB paramb,
   NEP_Energy_fast::ANN annmb,
-  const int N,
-  const int i,
-  const int t1_before,
-  const int t1_after,
+  const int N_domains,
+  const int* num_in_domain,
+  const int* i,
+  const int* t1_before,
+  const int* t1_after,
   const int* __restrict__ g_t2_radial,
   const float* __restrict__ g_x12_radial,
   const float* __restrict__ g_y12_radial,
@@ -353,15 +355,19 @@ static __global__ void find_energy_nep(
   float* g_q_radial_trial,
   float* g_s_angular_trial)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n1 < N) {
+  int thread = blockIdx.x * blockDim.x + threadIdx.x;
+  int n1 = thread/N_domains;
+  int domain = thread % N_domains;
+  if (n1 < num_in_domain[domain]) {
     float q[MAX_DIM] = {0.0f};
 
     // get radial descriptors
-    float r12[3] = {g_x12_radial[n1], g_y12_radial[n1], g_z12_radial[n1]};
+    float r12[3] = {g_x12_radial[thread], g_y12_radial[thread], g_z12_radial[thread]};
     float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
     float fc12;
-    int t2 = g_t2_radial[n1];
+    int t2 = g_t2_radial[thread];
+    int t1_b = t1_before[domain];
+    int t1_a = t1_after[domain];
     double rc = paramb.rc_radial;
     double rcinv = paramb.rcinv_radial;
     find_fc(rc, rcinv, d12, fc12);
@@ -373,18 +379,18 @@ static __global__ void find_energy_nep(
       float dgn12_i = 0.0f;
       for (int k = 0; k <= paramb.basis_size_radial; ++k) {
         int c_index_base = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
-        int c_index_before_n1 = c_index_base + t2 * paramb.num_types + t1_before;
-        int c_index_after_n1  = c_index_base + t2 * paramb.num_types + t1_after;
-        int c_index_before_i = c_index_base + t1_before * paramb.num_types + t2;
-        int c_index_after_i  = c_index_base + t1_after * paramb.num_types + t2;
+        int c_index_before_n1 = c_index_base + t2 * paramb.num_types + t1_b;
+        int c_index_after_n1  = c_index_base + t2 * paramb.num_types + t1_a;
+        int c_index_before_i = c_index_base + t1_b * paramb.num_types + t2;
+        int c_index_after_i  = c_index_base + t1_a * paramb.num_types + t2;
         dgn12_n1 += fn12[k] * (annmb.c[c_index_after_n1]-annmb.c[c_index_before_n1]); // change of gn_12 after MC swap for neighbor atom
         dgn12_i += fn12[k] * (annmb.c[c_index_after_i]-annmb.c[c_index_before_i]); // change of gn_12 after MC swap for central
       }
-      int index_n1 = n1*(paramb.n_max_radial+1) + n;
+      int index_n1 = (n1*(paramb.n_max_radial+1) + n) * N_domains + domain;
       q[n] = g_q_radial[index_n1] + dgn12_n1;
       g_q_radial_trial[index_n1] = q[n];//save trial value to global memory
 
-      int index_i = N*(paramb.n_max_radial+1) + n;
+      int index_i = (num_in_domain[domain]*(paramb.n_max_radial+1) + n) * N_domains + domain;
       atomicAdd(&g_q_radial_trial[index_i], dgn12_i);
     }
     
@@ -392,11 +398,11 @@ static __global__ void find_energy_nep(
     for (int n = 0; n <= paramb.n_max_angular; ++n) {
       float s[NUM_OF_ABC] = {0.0f}; 
       for (int l = 0; l<NUM_OF_ABC; ++l){
-          int index_local = n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          int index_local = (n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
           s[l] = g_s_angular[index_local];
       }
-      if (g_is_neigh_angular[n1]){// if n1 is angular neighbor of i
-        float r12[3] = {g_x12_radial[n1], g_y12_radial[n1], g_z12_radial[n1]};
+      if (g_is_neigh_angular[thread]){// if thread is angular neighbor of i
+        float r12[3] = {g_x12_radial[thread], g_y12_radial[thread], g_z12_radial[thread]};
         float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
         float fc12;
         double rc = paramb.rc_angular;
@@ -409,11 +415,11 @@ static __global__ void find_energy_nep(
         float dgn12_i = 0.0f;
         for (int k = 0; k <= paramb.basis_size_angular; ++k) {
           int base_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
-          int c_index_before_n1 = base_index + t2 * paramb.num_types + t1_before + paramb.num_c_radial;
-          int c_index_after_n1  = base_index + t2 * paramb.num_types + t1_after + paramb.num_c_radial;
+          int c_index_before_n1 = base_index + t2 * paramb.num_types + t1_b + paramb.num_c_radial;
+          int c_index_after_n1  = base_index + t2 * paramb.num_types + t1_a + paramb.num_c_radial;
           
-          int c_index_before_i = base_index + t1_before * paramb.num_types + t2 + paramb.num_c_radial;
-          int c_index_after_i  = base_index + t1_after * paramb.num_types + t2 + paramb.num_c_radial;
+          int c_index_before_i = base_index + t1_b * paramb.num_types + t2 + paramb.num_c_radial;
+          int c_index_after_i  = base_index + t1_a * paramb.num_types + t2 + paramb.num_c_radial;
 
           dgn12_n1 += fn12[k] * (annmb.c[c_index_after_n1] - annmb.c[c_index_before_n1]); // change of gn_12 after MC swap for neighbor atom
           dgn12_i += fn12[k] * (annmb.c[c_index_after_i] - annmb.c[c_index_before_i]);// change of gn_12 after MC swap for central atom
@@ -422,20 +428,20 @@ static __global__ void find_energy_nep(
         accumulate_s(paramb.L_max, d12, -r12[0], -r12[1], -r12[2], dgn12_n1, delta_s_n1);
         for (int l = 0; l<NUM_OF_ABC; ++l){
           s[l] = s[l] + delta_s_n1[l];
-          int index_local = n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          int index_local = (n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
           g_s_angular_trial[index_local] = s[l];//save trial value to global memory
         }
 
         float delta_s_i[NUM_OF_ABC] = {0.0f};
         accumulate_s(paramb.L_max, d12, r12[0], r12[1], r12[2], dgn12_i, delta_s_i);
         for (int l = 0; l<NUM_OF_ABC; ++l){
-          int index_local = N*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          int index_local = (num_in_domain[domain]*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
           atomicAdd(&g_s_angular_trial[index_local], delta_s_i[l]);//save trial value to global memory
         }
       }
       else {// if n1 is not angular neighbor of i
         for (int l = 0; l<NUM_OF_ABC; ++l){
-          int index_local = n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          int index_local = (n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
           g_s_angular_trial[index_local] = s[l];//save trial value (unchanged) to global memory 
         }
       }
@@ -456,19 +462,18 @@ static __global__ void find_energy_nep(
       apply_ann_one_layer(
         annmb.dim, annmb.num_neurons1, annmb.w0[t2], annmb.b0[t2], annmb.w1[t2], annmb.b1, q, F, Fp);
     }
-    g_delta_pe_nep[n1] = F-g_pe_nep[n1]; // calculate energy difference for neighbor atom
+    g_delta_pe_nep[thread] = F-g_pe_nep[thread]; // calculate energy difference for neighbor atom
   }
 }
 
-// a kernel with a single thread <<<1, 1>>>
 static __global__ void find_i_energy_nep(
   NEP_Energy_fast::ParaMB paramb,
   NEP_Energy_fast::ANN annmb,
-  const int N,
-  const int i,
-  const int g_NN_radial,
+  const int* num_in_domain,
+  const int* i,
+  const int N_domains,
   const int* g_NN_angular,
-  const int t1_after,
+  const int* t1_after,
   const int* __restrict__ g_t2_radial,
   const float* __restrict__ g_x12_radial,
   const float* __restrict__ g_y12_radial,
@@ -483,68 +488,76 @@ static __global__ void find_i_energy_nep(
   float* g_q_radial_trial,
   float* g_s_angular_trial)
 {
-  float q[MAX_DIM] = {0.0f};
+  int domain = blockIdx.x * blockDim.x + threadIdx.x;
+  if (domain < N_domains) {
+    float q[MAX_DIM] = {0.0f};
 
-  // get radial descriptors 
-  for (int n = 0; n <= paramb.n_max_radial; ++n) {
-    int index_i = N*(paramb.n_max_radial+1) + n;
-    q[n] = g_q_radial[index_i] + g_q_radial_trial[index_i];
-    g_q_radial_trial[index_i] = q[n]; //save trial value to global memory
-  }
-
-  // get angular descriptors
-  for (int n = 0; n <= paramb.n_max_angular; ++n) {
-    float s[NUM_OF_ABC] = {0.0f};
-    for (int l = 0; l<NUM_OF_ABC; ++l){
-      int index = N*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
-        s[l] = g_s_angular[index] + g_s_angular_trial[index];
-        g_s_angular_trial[index] = s[l]; //save trial value to global memory
+    // get radial descriptors 
+    for (int n = 0; n <= paramb.n_max_radial; ++n) {
+      int index_i = (num_in_domain[domain]*(paramb.n_max_radial+1) + n) * N_domains + domain;
+      q[n] = g_q_radial[index_i] + g_q_radial_trial[index_i];
+      g_q_radial_trial[index_i] = q[n]; //save trial value to global memory
     }
-    find_q(paramb.L_max, paramb.num_L, paramb.n_max_angular + 1, n, s, q + (paramb.n_max_radial + 1));
-  }
-  
-  // normalize descriptor
-  for (int d = 0; d < annmb.dim; ++d) {
-    q[d] = q[d] * paramb.q_scaler[d];
-  }
 
-  // get energy and energy gradient
-  float F = 0.0f, Fp[MAX_DIM] = {0.0f};
-  if (paramb.version == 5) {
-      apply_ann_one_layer_nep5(
-      annmb.dim, annmb.num_neurons1, annmb.w0[t1_after], annmb.b0[t1_after], annmb.w1[t1_after], annmb.b1, q, F, Fp);
-  } else {
-    apply_ann_one_layer(
-      annmb.dim, annmb.num_neurons1, annmb.w0[t1_after], annmb.b0[t1_after], annmb.w1[t1_after], annmb.b1, q, F, Fp);
+    // get angular descriptors
+    for (int n = 0; n <= paramb.n_max_angular; ++n) {
+      float s[NUM_OF_ABC] = {0.0f};
+      for (int l = 0; l<NUM_OF_ABC; ++l){
+        int index = (num_in_domain[domain]*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
+          s[l] = g_s_angular[index] + g_s_angular_trial[index];
+          g_s_angular_trial[index] = s[l]; //save trial value to global memory
+      }
+      find_q(paramb.L_max, paramb.num_L, paramb.n_max_angular + 1, n, s, q + (paramb.n_max_radial + 1));
+    }
+    
+    // normalize descriptor
+    for (int d = 0; d < annmb.dim; ++d) {
+      q[d] = q[d] * paramb.q_scaler[d];
+    }
+
+    // get energy and energy gradient
+    float F = 0.0f, Fp[MAX_DIM] = {0.0f};
+    int t1_a = t1_after[domain];
+    if (paramb.version == 5) {
+        apply_ann_one_layer_nep5(
+        annmb.dim, annmb.num_neurons1, annmb.w0[t1_a], annmb.b0[t1_a], annmb.w1[t1_a], annmb.b1, q, F, Fp);
+    } else {
+      apply_ann_one_layer(
+        annmb.dim, annmb.num_neurons1, annmb.w0[t1_a], annmb.b0[t1_a], annmb.w1[t1_a], annmb.b1, q, F, Fp);
+    }
+    int index_N = num_in_domain[domain]*N_domains + domain;
+    g_delta_pe_nep[index_N] = F-g_pe_nep[index_N];
   }
-  g_delta_pe_nep[N] = F-g_pe_nep[N];
 }
 
 static __global__ void find_energy_zbl(
-  const int N,
+  const int N_domains,
+  const int* num_in_domain,
   const NEP_Energy_fast::ParaMB paramb,
   const NEP_Energy_fast::ZBL zbl,
-  const int t1_before,
-  const int t1_after,
+  const int* t1_before,
+  const int* t1_after,
   const int* g_t2_angular,
   const float* __restrict__ g_x12,
   const float* __restrict__ g_y12,
   const float* __restrict__ g_z12,
   float* g_delta_pe_zbl)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n1 < N) {
-    float r12[3] = {g_x12[n1], g_y12[n1], g_z12[n1]};
+  int thread = blockIdx.x * blockDim.x + threadIdx.x;
+  int n1 = thread/N_domains;
+  int domain = thread%domain;
+  if (n1 < num_in_domain[domain]) {
+    float r12[3] = {g_x12[thread], g_y12[thread], g_z12[thread]};
     float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
     float d12inv = 1.0f / d12;
     float f_before, f_after, fp;
-    int type2 = g_t2_angular[n1];
+    int type2 = g_t2_angular[thread];
     int zj = zbl.atomic_numbers[type2];
 
     // TODO потенциал несимметричен относительно i <-> j. надо это учесть!!
 
     //after trial step
-    int type1 = t1_after;
+    int type1 = t1_after[domain];
     int zi = zbl.atomic_numbers[type1];
     float pow_zi = pow(float(zi), 0.23f);
 
@@ -579,7 +592,7 @@ static __global__ void find_energy_zbl(
     }
 
     //before trial step
-    type1 = t1_before;
+    type1 = t1_before[domain];
     zi = zbl.atomic_numbers[type1];
     pow_zi = pow(float(zi), 0.23f);
 
@@ -613,16 +626,18 @@ static __global__ void find_energy_zbl(
       find_f_and_fp_zbl(zizj, a_inv, rc_inner, rc_outer, d12, d12inv, f_before, fp);
     }
     
-    g_delta_pe_zbl[n1] = f_after-f_before;
+    g_delta_pe_zbl[thread] = f_after-f_before;
   }
 }
 
 void NEP_Energy_fast::find_energy(
+  const int N_domains,
+  const int* num_neighbors_in_domain,
   const int N,
-  const int i,
+  const int* i,
   const int* g_NN_angular,
-  const int type_i,
-  const int type_j,
+  const int* type_i,
+  const int* type_j,
   const int* g_t2_radial,
   const float* g_x12_radial,
   const float* g_y12_radial,
@@ -632,10 +647,13 @@ void NEP_Energy_fast::find_energy(
   float* g_pe_nep,
   float* g_delta_pe_zbl)
 {
+  
+
   find_energy_nep<<<(N - 1) / 64 + 1, 64>>>( // find energy change of NEP for neighbors
     paramb,
     annmb,
-    N,
+    N_domains,
+    num_neighbors_in_domain,
     i,
     type_i,
     type_j,
@@ -654,12 +672,12 @@ void NEP_Energy_fast::find_energy(
     nep_data.s_angular_trial_local.data());
   GPU_CHECK_KERNEL
 
-  find_i_energy_nep<<<1,1>>>( // find energy chnage of NEP for the central atom
+  find_i_energy_nep<<<(N_domains - 1) / 64 + 1, 64>>>( // find energy change of NEP for the central atoms
     paramb,
     annmb,
-    N,
+    num_neighbors_in_domain,
     i,
-    N,
+    N_domains,
     g_NN_angular,
     type_j,
     g_t2_radial,
@@ -678,7 +696,8 @@ void NEP_Energy_fast::find_energy(
 
     if (zbl.enabled){
       find_energy_zbl<<<(N - 1) / 64 + 1, 64>>>( // find energy change of ZBL
-      N,
+      N_domains,
+      num_neighbors_in_domain,
       paramb,
       zbl,
       type_i,
@@ -695,7 +714,9 @@ void NEP_Energy_fast::find_energy(
 
 static __global__ void accept_trial_kernel(
   NEP_Energy_fast::ParaMB paramb,
-  const int N_local,
+  const int N_domains,
+  const int* num_in_domains,
+  const bool* is_accepted,
   const int* atom_local,
   float* q_radial,
   float* s_angular,
@@ -703,42 +724,50 @@ static __global__ void accept_trial_kernel(
   float* s_angular_trial,
   float* g_pe_nep_before,
   float* g_delta_pe_nep,
-  const int i)
+  const int* i)
 {
-  int k = blockIdx.x * blockDim.x + threadIdx.x;
+  int thread = blockIdx.x * blockDim.x + threadIdx.x;
+  int k = thread/N_domains;
+  int domain = thread % N_domains;
+  int N_local = num_in_domains[domain];
   if (k <= N_local) {
     int n1;
     if (k < N_local){ 
-      n1 = atom_local[k];
+      n1 = atom_local[thread];
     }
     else {
-      n1 = i;
+      n1 = i[domain];
     }
     for (int n = 0; n<=paramb.n_max_radial; ++n){
-      int index_local = k*(paramb.n_max_radial+1) + n;
+      int index_local = (k*(paramb.n_max_radial+1) + n) * N_domains + domain;
       int index = n1*(paramb.n_max_radial+1) + n;
       q_radial[index] = q_radial_trial[index_local];
     }
     for (int n = 0; n<=paramb.n_max_angular; ++n){
       for (int l = 0; l<NUM_OF_ABC; ++l){
-        int index_local = k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+        int index_local = (k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
         int index = n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
         s_angular[index] = s_angular_trial[index_local];
       }
     }
-    g_pe_nep_before[n1] += g_delta_pe_nep[k];
+    g_pe_nep_before[n1] += g_delta_pe_nep[thread];
   }
 }
 
 void NEP_Energy_fast::accept_trial(
-  const int N_local,
+  const int N,
+  const int N_domains,
+  const int* num_in_domains,
+  const bool* is_accepted,
   const int* atom_local,
   float* g_delta_pe_nep,
-  const int i)
+  const int* i)
 {
-  accept_trial_kernel<<<((N_local+1) - 1) / 64 + 1, 64>>>(
+  accept_trial_kernel<<<(N - 1) / 64 + 1, 64>>>(
     NEP_Energy_fast::paramb,
-    N_local,
+    N_domains,
+    num_in_domains,
+    is_accepted,
     atom_local,
     nep_data.q_radial.data(),
     nep_data.s_angular.data(),
@@ -1138,7 +1167,7 @@ static __global__ void find_subdomain_counts(
   const Box box,
   const int N,
   int* subdomain_count,
-  int* subdomain_class,
+  int* subdomain_color,
   const double* x,
   const double* y,
   const double* z,
@@ -1151,11 +1180,11 @@ static __global__ void find_subdomain_counts(
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
-    int subdomain_id, _subdomain_class;
-    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id, _subdomain_class);
+    int subdomain_id, _subdomain_color;
+    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id, _subdomain_color);
     int old_count = atomicAdd(&subdomain_count[subdomain_id], 1);
     if (old_count == 0) {
-        subdomain_class[subdomain_id] = _subdomain_class;
+        subdomain_color[subdomain_id] = _subdomain_color;
     }
   }
 }
@@ -1178,8 +1207,8 @@ static __global__ void find_subdomain_contents(
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
-    int subdomain_id, subdomain_class;
-    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id, subdomain_class);
+    int subdomain_id, subdomain_color;
+    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id, subdomain_color);
     const int ind = atomicAdd(&subdomain_count[subdomain_id], 1);
     subdomain_contents[subdomain_count_sum[subdomain_id] + ind] = n1;
   }
@@ -1197,7 +1226,7 @@ static __device__ void find_subdomain_id(
   const int ny,
   const int nz,
   int& subdomain_id,
-  int& subdomain_class
+  int& subdomain_color
 )
 {
   int subdomain_id_x, subdomain_id_y, subdomain_id_z;
@@ -1205,7 +1234,7 @@ static __device__ void find_subdomain_id(
   int px = subdomain_id_x%2;
   int py = subdomain_id_y%2;
   int pz = subdomain_id_z%2;
-  subdomain_class = px*4 + py*2 + pz;
+  subdomain_color = px*4 + py*2 + pz;
 }
 
 static __device__ void find_subdomain_id(
@@ -1263,12 +1292,12 @@ void NEP_Energy_fast::find_subdomain_list(
       // number of domains is allowed to be larger than the number of atoms
       if (N_subdomains > nep_data.subdomain_count.size()) {
         nep_data.subdomain_count.resize(N_subdomains);
-        nep_data.subdomain_class.resize(N_subdomains);
+        nep_data.subdomain_color.resize(N_subdomains);
         nep_data.subdomain_count_sum.resize(N_subdomains);
       }
 
       CHECK(gpuMemset(nep_data.subdomain_count.data(), 0, sizeof(int) * N_subdomains));
-      CHECK(gpuMemset(nep_data.subdomain_class.data(), 0, sizeof(int) * N_subdomains));
+      CHECK(gpuMemset(nep_data.subdomain_color.data(), 0, sizeof(int) * N_subdomains));
       CHECK(gpuMemset(nep_data.subdomain_count_sum.data(), 0, sizeof(int) * N_subdomains));
       CHECK(gpuMemset(nep_data.subdomain_contents.data(), 0, sizeof(int) * N));
 
@@ -1276,7 +1305,7 @@ void NEP_Energy_fast::find_subdomain_list(
         box, 
         N, 
         nep_data.subdomain_count.data(), 
-        nep_data.subdomain_class.data(),
+        nep_data.subdomain_color.data(),
         x, 
         y, 
         z, 

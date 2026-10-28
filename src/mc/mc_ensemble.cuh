@@ -29,7 +29,7 @@ class MC_Ensemble
 {
 public:
   MC_Ensemble(const char** param, int num_param);
-  MC_Ensemble(const char** param, int num_param, const int num_atoms); // overload in order to provide number of atoms to NEP_fast initialisation
+  MC_Ensemble(const char** param, int num_param, const int num_atoms, const int Nx_domains, const int Ny_domains, const int Nz_domains); // overload in order to provide number of atoms to NEP_fast initialisation
   virtual ~MC_Ensemble(void);
 
   virtual void compute(

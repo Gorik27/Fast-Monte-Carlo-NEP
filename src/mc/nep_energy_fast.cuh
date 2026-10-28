@@ -50,7 +50,7 @@ struct NEP_Fast_Data {
   GPU_Vector<int> num_domains;
   GPU_Vector<double> subdomain_inv_size;
   GPU_Vector<int> subdomain_count;
-  GPU_Vector<int> subdomain_class;
+  GPU_Vector<int> subdomain_color;
   GPU_Vector<int> subdomain_count_sum;
   GPU_Vector<int> subdomain_contents;
 
@@ -131,15 +131,18 @@ public:
     const char* file_potential, 
     const int num_atoms,
     const int n_max, 
-    const int m_max);
+    const int m_max,
+    const int N_domains);
 
 
   void find_energy(
+      const int N_domains,
+      const int* num_neighbors_in_domain,
       const int N,
-      const int i,
+      const int* i,
       const int* g_NN_angular,
-      const int type_i,
-      const int type_j,
+      const int* type_i,
+      const int* type_j,
       const int* g_t2_radial,
       const float* g_x12_radial,
       const float* g_y12_radial,
@@ -159,10 +162,13 @@ public:
     const GPU_Vector<double>& position);
 
   void accept_trial(
-    const int N_local,
+    const int N,
+    const int N_domains,
+    const int* num_in_domains,
+    const bool* is_accepted,
     const int* atom_local,
     float* g_delta_pe_nep,
-    const int i);
+    const int* i);
 
   bool has_dftd3 = false;
   

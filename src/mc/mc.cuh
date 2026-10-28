@@ -49,6 +49,7 @@ private:
   std::vector<int> types;
   std::vector<int> num_atoms_species;
   std::vector<double> mu_or_phi;
+  std::vector<double> target_conc;
 
   void parse_group(
     const char** param, int num_param, std::vector<Group>& groups, int num_param_before_group);

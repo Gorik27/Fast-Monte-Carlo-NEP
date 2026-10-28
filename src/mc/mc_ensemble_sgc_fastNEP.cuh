@@ -20,9 +20,17 @@ class MC_Ensemble_SGC_fastNEP : public MC_Ensemble
 {
 public:
   int num_atoms;
+  int Nx_domains;
+  int Ny_domains;
+  int Nz_domains;
+  int N_domains;
+  int N_subdomains;
 
   MC_Ensemble_SGC_fastNEP(
     const int num_atoms,
+    const int Nx_domains,
+    const int Ny_domains,
+    const int Nz_domains,
     const char** param,
     int num_param,
     double swap_fraction_mc,
@@ -31,6 +39,7 @@ public:
     std::vector<int>& types,
     std::vector<int>& num_atoms_species,
     std::vector<double>& mu_or_phi,
+    std::vector<double>& target_concentration,
     double kappa);
   virtual ~MC_Ensemble_SGC_fastNEP(void);
 
@@ -56,11 +65,12 @@ private:
   std::vector<int> types;
   std::vector<int> num_atoms_species;
   std::vector<double> mu_or_phi;
-  int index_old_species;
-  int index_new_species;
+  std::vector<double> target_concentration;
+  int _index_old_species;
   double kappa;
   GPU_Vector<int> t2_radial;
   GPU_Vector<bool> is_neigh_angular;
+  GPU_Vector<bool> g_is_accepted;
 
   bool allowed_species(std::string& species_found);
 };

@@ -109,7 +109,7 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param)
 #endif
 }
 
-MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms)// overload in order to provide number of atoms to NEP_fast initialisation
+MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms, const int Nx_domains, const int Ny_domains, const int Nz_domains)// overload in order to provide number of atoms to NEP_fast initialisation
 {
   mc_output.open("mcmd.out", std::ios::app);
   mc_output << "# ";
@@ -126,22 +126,23 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms)
 
   //const int n_max = 1000;
   //const int m_max = 1000;
-  NN_radial.resize(n_max);
-  NN_angular.resize(n_max);
-  local_type_before.resize(n_max);
-  local_type_after.resize(n_max);
-  t2_radial_before.resize(n_max * m_max);
-  t2_radial_after.resize(n_max * m_max);
-  t2_angular_before.resize(n_max * m_max);
-  t2_angular_after.resize(n_max * m_max);
-  x12_radial.resize(n_max * m_max);
-  y12_radial.resize(n_max * m_max);
-  z12_radial.resize(n_max * m_max);
-  x12_angular.resize(n_max * m_max);
-  y12_angular.resize(n_max * m_max);
-  z12_angular.resize(n_max * m_max);
-  pe_before.resize(n_max);
-  pe_after.resize(n_max);
+  int N_domains = Nx_domains * Ny_domains * Nz_domains;
+  NN_radial.resize(n_max * N_domains);
+  NN_angular.resize(n_max * N_domains);
+  local_type_before.resize(n_max * N_domains);
+  local_type_after.resize(n_max * N_domains);
+  t2_radial_before.resize(n_max * m_max * N_domains);
+  t2_radial_after.resize(n_max * m_max * N_domains);
+  t2_angular_before.resize(n_max * m_max * N_domains);
+  t2_angular_after.resize(n_max * m_max * N_domains);
+  x12_radial.resize(n_max * m_max * N_domains);
+  y12_radial.resize(n_max * m_max * N_domains);
+  z12_radial.resize(n_max * m_max * N_domains);
+  x12_angular.resize(n_max * m_max * N_domains);
+  y12_angular.resize(n_max * m_max * N_domains);
+  z12_angular.resize(n_max * m_max * N_domains);
+  pe_before.resize(n_max * N_domains);
+  pe_after.resize(n_max * N_domains);
 
   std::string potential_file_name = get_potential_file_name();
   check_is_nep(potential_file_name);
@@ -149,7 +150,8 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms)
     potential_file_name.c_str(), 
     num_atoms, 
     n_max, 
-    m_max);
+    m_max,
+    N_domains);
 
 #ifdef DEBUG
   rng = std::mt19937(13579);

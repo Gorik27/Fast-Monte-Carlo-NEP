@@ -227,12 +227,18 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     printf("Perform VCSGC MCMD:\n");
     mc_ensemble_type = 2;
   } else if (strcmp(param[1], "sgc_fast") == 0) {
-    printf("Perform SGC MCMD using the fast method:\n");
+    printf("Perform SGC MCMD using the fast implementation:\n");
     mc_ensemble_type = 3;
   } else if (strcmp(param[1], "vcsgc_fast") == 0) {
-    printf("Perform VCSGC MCMD using the fast method:\n");
+    printf("Perform VCSGC MCMD using the fast implementation:\n");
     mc_ensemble_type = 4;
-  }  else {
+  } else if (strcmp(param[1], "sgc_par") == 0) {
+    printf("Perform SGC MCMD using the parallel implementation:\n");
+    mc_ensemble_type = 5;
+  } else if (strcmp(param[1], "vcsgc_par") == 0) {
+    printf("Perform VCSGC MCMD using the parallel implementation:\n");
+    mc_ensemble_type = 6;
+  } else {
     PRINT_INPUT_ERROR("invalid MC ensemble for MCMD.\n");
   }
 
@@ -252,7 +258,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     }
     printf("    after every %d MD steps, do %d MC trials.\n", num_steps_md, num_steps_mc);
   }
-  else if (mc_ensemble_type >=3 && mc_ensemble_type <=4){
+  else if (mc_ensemble_type >=3 && mc_ensemble_type <=6){
     if (!is_valid_real(param[3], &swap_fraction_mc)) {
       PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be a number.\n");
     }
@@ -308,6 +314,67 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     }
   }
 
+  if (mc_ensemble_type == 5) {
+    if (num_param < 10) {
+      PRINT_INPUT_ERROR("reading error for num_types in SGC/VCSGC MCMD.\n");
+    }
+    if (!is_valid_int(param[6], &num_types_mc)) {
+      PRINT_INPUT_ERROR("number of types in SGC/VCSGC MC trials should be an integer.\n");
+    }
+    if (num_types_mc < 2 || num_types_mc > 4) {
+      PRINT_INPUT_ERROR("number of types in SGC/VCSGC MC trials should be 2 to 4.\n");
+    }
+    printf("    number of species involved in SGC/VCSGC = %d.\n", num_types_mc);
+
+    if (num_param < (10 + num_types_mc * 2)) {
+      PRINT_INPUT_ERROR("not enough (species, mu) or (species, phi) inputs.\n");
+    }
+
+    species.resize(num_types_mc);
+    mu_or_phi.resize(num_types_mc);
+    for (int n = 0; n < num_types_mc; ++n) {
+      species[n] = param[7 + n * 2];
+      if (!is_valid_real(param[7 + n * 2 + 1], &mu_or_phi[n])) {
+        PRINT_INPUT_ERROR("mu or phi should be a number.\n");
+      }
+      printf("        species = %s, mu/phi= %g\n", species[n].c_str(), mu_or_phi[n]);
+    }
+  }
+
+  if (mc_ensemble_type == 6) {
+    if (num_param < 10) {
+      PRINT_INPUT_ERROR("reading error for num_types in SGC/VCSGC MCMD.\n");
+    }
+    if (!is_valid_int(param[6], &num_types_mc)) {
+      PRINT_INPUT_ERROR("number of types in SGC/VCSGC MC trials should be an integer.\n");
+    }
+    if (num_types_mc < 2 || num_types_mc > 4) {
+      PRINT_INPUT_ERROR("number of types in SGC/VCSGC MC trials should be 2 to 4.\n");
+    }
+    printf("    number of species involved in SGC/VCSGC = %d.\n", num_types_mc);
+
+    if (num_param < (10 + num_types_mc * 3)) {
+      PRINT_INPUT_ERROR("not enough (species, mu) or (species, phi) inputs.\n");
+    }
+
+    species.resize(num_types_mc);
+    mu_or_phi.resize(num_types_mc);
+    target_conc.resize(num_types_mc);
+    for (int n = 0; n < num_types_mc; ++n) {
+      species[n] = param[7 + n * 3];
+      if (!is_valid_real(param[7 + n * 3 + 1], &mu_or_phi[n])) {
+        PRINT_INPUT_ERROR("mu or phi should be a number.\n");
+      }
+      if (!is_valid_real(param[7 + n * 3 + 2], &target_conc[n])) {
+        PRINT_INPUT_ERROR("target concentration should be a number.\n");
+      }
+      if (target_conc[n] < 0.0 || target_conc[n] > 1.0){
+        PRINT_INPUT_ERROR("target concentration should be from 0 to 1.\n");
+      }
+      printf("        species = %s, mu/phi= %g, c0= %g\n", species[n].c_str(), mu_or_phi[n], target_conc[n]);
+    }
+  }
+
   if (mc_ensemble_type == 2 || mc_ensemble_type == 4) {
     if (num_param < 7 + num_types_mc * 2 + 1) {
       PRINT_INPUT_ERROR("Should have kappa for VCSGC.\n");
@@ -321,11 +388,61 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     printf("    kappa = %g\n", kappa);
   }
 
+  int Nx_domains = 1;
+  int Ny_domains = 1;
+  int Nz_domains = 1;
+  if (mc_ensemble_type == 6) {
+    if (num_param < 10 + num_types_mc * 3 + 1) {
+      PRINT_INPUT_ERROR("Should have kappa for VCSGC.\n");
+    }
+    if (!is_valid_real(param[7 + num_types_mc * 3], &kappa)) {
+      PRINT_INPUT_ERROR("kappa should be a number.\n");
+    }
+    if (kappa < 0) {
+      PRINT_INPUT_ERROR("kappa should be positive.\n");
+    }
+    printf("    kappa = %g\n", kappa);
+
+    if (!is_valid_int(param[8 + num_types_mc * 3], &Nx_domains)) {
+      PRINT_INPUT_ERROR("number of domains should be an integer.\n");
+    }
+    if (!is_valid_int(param[9 + num_types_mc * 3], &Ny_domains)) {
+      PRINT_INPUT_ERROR("number of domains should be an integer.\n");
+    }
+    if (!is_valid_int(param[10 + num_types_mc * 3], &Nz_domains)) {
+      PRINT_INPUT_ERROR("number of domains should be an integer.\n");
+    }
+    if (Nx_domains < 0 || Ny_domains < 0 || Nz_domains < 0) {
+      PRINT_INPUT_ERROR("number of domains should be positive.\n");
+    }
+    printf("    number of domains = (%d, %d, %d)\n", Nx_domains, Ny_domains, Nz_domains);
+  }
+
+  if (mc_ensemble_type == 5) {
+    if (!is_valid_int(param[7 + num_types_mc * 2], &Nx_domains)) {
+      PRINT_INPUT_ERROR("number of domains should be an integer.\n");
+    }
+    if (!is_valid_int(param[8 + num_types_mc * 2], &Ny_domains)) {
+      PRINT_INPUT_ERROR("number of domains should be an integer.\n");
+    }
+    if (!is_valid_int(param[9 + num_types_mc * 2], &Nz_domains)) {
+      PRINT_INPUT_ERROR("number of domains should be an integer.\n");
+    }
+    if (Nx_domains < 0 || Ny_domains < 0 || Nz_domains < 0) {
+      PRINT_INPUT_ERROR("number of domains should be positive.\n");
+    }
+    printf("    number of domains = (%d, %d, %d)\n", Nx_domains, Ny_domains, Nz_domains);
+  }
+
   int num_param_before_group = 6;
   if (mc_ensemble_type == 1 || mc_ensemble_type == 3) {
     num_param_before_group = 7 + num_types_mc * 2;
   } else if (mc_ensemble_type == 2 || mc_ensemble_type == 4) {
     num_param_before_group = 8 + num_types_mc * 2;
+  } else if (mc_ensemble_type == 5) { // TODO что это?
+    num_param_before_group = 10 + num_types_mc * 2;
+  } else if (mc_ensemble_type == 6) {
+    num_param_before_group = 11 + num_types_mc * 3;
   }
 
   if (num_param > num_param_before_group) {
@@ -353,11 +470,19 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
   } else if (mc_ensemble_type == 3) {
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
-      atom.number_of_atoms, param, num_param, swap_fraction_mc, false, species, types, num_atoms_species, mu_or_phi, kappa));
+      atom.number_of_atoms, 1, 1, 1, param, num_param, swap_fraction_mc, false, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   } else if (mc_ensemble_type == 4) {
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
-      atom.number_of_atoms, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, kappa));
+      atom.number_of_atoms, 1, 1, 1, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
+  } else if (mc_ensemble_type == 5) {
+    check_species_sgc(groups, atom);
+    mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
+      atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, swap_fraction_mc, false, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
+  } else if (mc_ensemble_type == 6) {
+    check_species_sgc(groups, atom);
+    mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
+      atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   }
 
   do_mcmd = true;

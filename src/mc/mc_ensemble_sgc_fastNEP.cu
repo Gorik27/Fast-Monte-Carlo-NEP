@@ -32,6 +32,7 @@ integration across phase boundaries, Phys. Rev. B 86, 134204 (2012).
 #include <map>
 #include <cstring>
 #include <cmath>
+#include <array>
 
 const std::map<std::string, double> MASS_TABLE{
   {"H", 1.0080000000},
@@ -139,7 +140,10 @@ const std::map<std::string, double> MASS_TABLE{
   {"Lr", 262}};
 
 MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
-  int num_atoms_input,
+  const int num_atoms_input,
+  const int Nx_domains_input,
+  const int Ny_domains_input,
+  const int Nz_domains_input,
   const char** param,
   int num_param,
   double swap_fraction_mc_input,
@@ -148,27 +152,28 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
   std::vector<int>& types_input,
   std::vector<int>& num_atoms_species_input,
   std::vector<double>& mu_or_phi_input,
+  std::vector<double>& target_conc_input,
   double kappa_input)
-  : MC_Ensemble(param, num_param, num_atoms_input)
+  : MC_Ensemble(param, num_param, num_atoms_input, Nx_domains_input, Ny_domains_input, Nz_domains_input)
 {
   num_atoms = num_atoms_input;
+  N_domains = Nx_domains_input * Ny_domains_input * Nz_domains_input;
+  N_subdomains = N_domains*8;
   swap_fraction_mc = swap_fraction_mc_input;
   is_vcsgc = is_vcsgc_input;
   species = species_input;
   types = types_input;
   num_atoms_species = num_atoms_species_input;
   mu_or_phi = mu_or_phi_input;
+  target_concentration = target_conc_input;
   kappa = kappa_input;
-  NN_ij.resize(1);
-  NL_ij.resize(n_max);
+  int host_domains[3] = { Nx_domains, Ny_domains, Nz_domains };
 
-  pe_nep_before_local.resize(n_max);
-  delta_pe_nep.resize(n_max);
-  delta_pe_zbl.resize(n_max);
+  CHECK(gpuMemcpy(nep_energy_fast.nep_data.num_domains.data(), 
+                  host_domains, 
+                  3 * sizeof(int), 
+                  gpuMemcpyHostToDevice)); 
 
-  NN_angular_i.resize(m_max);
-  t2_radial.resize(n_max);
-  is_neigh_angular.resize(n_max);
 }
 
 MC_Ensemble_SGC_fastNEP::~MC_Ensemble_SGC_fastNEP(void) { mc_output.close(); }
@@ -176,7 +181,8 @@ MC_Ensemble_SGC_fastNEP::~MC_Ensemble_SGC_fastNEP(void) { mc_output.close(); }
 static __global__ void get_neighbors_of_i_fastNEP(
   const int N,
   const Box box,
-  const int i,
+  const int* i,
+  const int N_domains,
   const float rc_radial_square,
   const double* __restrict__ g_x,
   const double* __restrict__ g_y,
@@ -187,29 +193,38 @@ static __global__ void get_neighbors_of_i_fastNEP(
   float* g_pe_nep_before_local)
 {
   int n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n < N && n != i) {
+  if (n < N) {
     double x0 = g_x[n];
     double y0 = g_y[n];
     double z0 = g_z[n];
-    double x0i = g_x[i] - x0;
-    double y0i = g_y[i] - y0;
-    double z0i = g_z[i] - z0;
+    double pe_n = g_pe_nep_before[n];
 
-    apply_mic(box, x0i, y0i, z0i);
-    float distance_square_i = float(x0i * x0i + y0i * y0i + z0i * z0i);
+    for (int domain = 0; domain < N_domains; ++domain){
+      int target_idx = i[domain];
+      if (n != target_idx){
 
-    if (distance_square_i < rc_radial_square) {
-      int index = atomicAdd(g_NN_i, 1);
-      g_pe_nep_before_local[index] = g_pe_nep_before[n]; 
-      g_NL_i[index] = n;
+        double x0i = g_x[target_idx] - x0;
+        double y0i = g_y[target_idx] - y0;
+        double z0i = g_z[target_idx] - z0;
+
+        apply_mic(box, x0i, y0i, z0i);
+        float distance_square_i = float(x0i * x0i + y0i * y0i + z0i * z0i);
+
+        if (distance_square_i < rc_radial_square) {
+          int index = atomicAdd(&g_NN_i[domain], 1)*N_domains + domain;
+          g_pe_nep_before_local[index] = pe_n; 
+          g_NL_i[index] = n;
+        }        
+      }
     }
   }
 }
 
 static __global__ void create_inputs_for_energy_calculator_fastNEP(
   NEP_Energy_fast::ParaMB paramb,
-  const int N_local,
-  const int i,
+  const int* N_local,
+  const int N_domains,
+  const int* i,
   const int* atom_local,
   const Box box,
   const float rc_radial_square,
@@ -229,26 +244,28 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
   float* g_q_radial_local,
   float* g_s_angular_local)
 {
-  int k = blockIdx.x * blockDim.x + threadIdx.x; // neighbors of the swapped atom i
-  if (k<N_local) {
-    int n1 = atom_local[k];
+  int thread = blockIdx.x * blockDim.x + threadIdx.x; 
+  int k = thread/N_domains; // neighbors of the swapped atom i
+  int domain = thread%N_domains;
+  if (k<N_local[domain]) {
+    int n1 = atom_local[thread];
     double x2 = g_x[n1];
     double y2 = g_y[n1];
     double z2 = g_z[n1];
-    double x12 = x2 - g_x[i];
-    double y12 = y2 - g_y[i];
-    double z12 = z2 - g_z[i];
+    double x12 = x2 - g_x[i[domain]];
+    double y12 = y2 - g_y[i[domain]];
+    double z12 = z2 - g_z[i[domain]];
     apply_mic(box, x12, y12, z12);
     float distance_square = float(x12 * x12 + y12 * y12 + z12 * z12);
     if (distance_square < rc_radial_square) {
-      g_t2_radial[k] = g_type[n1];
-      g_x12_radial[k] = float(x12);
-      g_y12_radial[k] = float(y12);
-      g_z12_radial[k] = float(z12);
+      g_t2_radial[thread] = g_type[n1];
+      g_x12_radial[thread] = float(x12);
+      g_y12_radial[thread] = float(y12);
+      g_z12_radial[thread] = float(z12);
       
       for (int n = 0; n <= paramb.n_max_radial; ++n){
         int index, index_local;
-        index_local = k*(paramb.n_max_radial+1) + n;
+        index_local = (k*(paramb.n_max_radial+1) + n)*N_domains + domain;
         index = n1*(paramb.n_max_radial+1) + n;
         g_q_radial_local[index_local] = g_q_radial[index];
       }
@@ -256,32 +273,32 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
       for (int n = 0; n <= paramb.n_max_angular; ++n){
         for (int l = 0; l<NUM_OF_ABC; ++l){
           int index, index_local;
-          index_local = k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          index_local = (k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
           index =      n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
           g_s_angular_local[index_local] = g_s_angular[index];
         }
       }
       if (distance_square < rc_angular_square) {
-        g_is_neigh_angular[k] = true;
+        g_is_neigh_angular[thread] = true;
       }
       else {
-        g_is_neigh_angular[k] = false;
+        g_is_neigh_angular[thread] = false;
       }
     }
   }
-  else if (k == N_local){// central (i) atom
+  else if (k == N_local[domain]){// central (i) atom
     for (int n = 0; n <= paramb.n_max_radial; ++n){
         int index, index_local;
-        index_local = k*(paramb.n_max_radial+1) + n;
-        index = i*(paramb.n_max_radial+1) + n;
+        index_local = (k*(paramb.n_max_radial+1) + n) * N_domains + domain;
+        index = i[domain]*(paramb.n_max_radial+1) + n;
         g_q_radial_local[index_local] = g_q_radial[index];
       }
 
     for (int n = 0; n <= paramb.n_max_angular; ++n){
         for (int l = 0; l<NUM_OF_ABC; ++l){
           int index, index_local;
-          index_local = k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
-          index =      i*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+          index_local = (k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
+          index =      i[domain]*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
           g_s_angular_local[index_local] = g_s_angular[index];
         }
       }
@@ -312,7 +329,7 @@ bool MC_Ensemble_SGC_fastNEP::allowed_species(std::string& species_found)
 {
   for (int k = 0; k < species.size(); ++k) {
     if (species[k] == species_found) {
-      index_old_species = k;
+      _index_old_species = k;
       return true;
     }
   }
@@ -335,7 +352,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
   int group_size =
     grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
-  std::uniform_int_distribution<int> r1(0, group_size - 1);
 
   nep_energy_fast.compute_large_box( // compute all descriptors and energy and save it to memeory (nep_data: pe_nep, q_radial, s_angular)
     box, 
@@ -345,6 +361,23 @@ void MC_Ensemble_SGC_fastNEP::compute(
   nep_energy_fast.find_subdomain_list(
     box,
     atom.position_per_atom);// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
+    // TODO: реализовать случайное смещение начала отсчета чтобы убрать корреляции из-за границ доменов
+
+  std::array<std::vector<int>, 8> subdomains;
+
+  std::vector<std::uniform_int_distribution<int>> r1;
+  r1.reserve(N_subdomains);
+  for (int i = 0; i < N_subdomains; ++i) {
+    int size = nep_energy_fast.nep_data.subdomain_count[i];
+    if (size == 0) {
+      r1.emplace_back(0, 0);
+    }
+    else {
+      r1.emplace_back(0, size - 1);
+    }
+    int color =  nep_energy_fast.nep_data.subdomain_color[i];
+    subdomains[color].push_back(i);
+  }
 
   int num_accepted = 0;
   int num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
@@ -354,33 +387,74 @@ void MC_Ensemble_SGC_fastNEP::compute(
     mc_debug_log << "# i; type_i; type_j; energy_difference" << std::endl;
   #endif
 
-  for (int step = 0; step < num_steps_mc; ++step) {
-    int i = -1;
-    int type_i = -1;
-    std::string species_found;
-    while (!allowed_species(species_found)) {
-      i = grouping_method >= 0
-            ? groups[grouping_method]
-                .cpu_contents[groups[grouping_method].cpu_size_sum[group_id] + r1(rng)]
-            : r1(rng);
-      species_found = atom.cpu_atom_symbol[i];
-      type_i = atom.cpu_type[i];
-    }
+  std::uniform_int_distribution<int> color(0, 7);
 
-    int type_j = type_i;
-    std::uniform_int_distribution<int> rand_int2(0, types.size() - 1);
-    while (type_j == type_i) {
-      index_new_species = rand_int2(rng);
-      type_j = types[index_new_species];
-    }
+  std::uniform_int_distribution<int> rand_int2(0, types.size() - 1);
 
+  for (int step = 0; step < (num_steps_mc-1)/N_domains+1; ++step) {
     NN_ij.fill(0);
     pe_nep_before_local.fill(0.0f);
+    NN_angular_i.fill(0);
+    nep_energy_fast.nep_data.q_radial_local.fill(0.0f);
+    nep_energy_fast.nep_data.s_angular_local.fill(0.0f);
+    nep_energy_fast.nep_data.q_radial_i.fill(0.0f);
+    nep_energy_fast.nep_data.s_angular_i.fill(0.0f);
+    is_neigh_angular.fill(false);
+    t2_radial.fill(0);
+    x12_radial.fill(0.0f);
+    y12_radial.fill(0.0f);
+    z12_radial.fill(0.0f);
+    nep_energy_fast.nep_data.q_radial_trial_local.fill(0.0f);
+    nep_energy_fast.nep_data.s_angular_trial_local.fill(0.0f);
+    delta_pe_nep.fill(0.0f);
+    delta_pe_zbl.fill(0.0f);
 
-    get_neighbors_of_i_fastNEP<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
+    int subdomain_color = color(rng);
+
+    std::vector<int> i_cpu(N_domains, -1);
+    std::vector<int> type_i_cpu(N_domains, -1);
+    std::vector<int> type_j_cpu(N_domains);
+    std::vector<int> index_new_species_cpu(N_domains);
+    std::vector<int> index_old_species_cpu(N_domains);
+
+    for (int domain = 0; domain < N_domains; ++domain){
+      int subdomain = subdomains[subdomain_color][domain];
+      std::string species_found;
+      while (!allowed_species(species_found)) {
+        int local_ind = r1[subdomain](rng);
+        int global_ind = nep_energy_fast.nep_data.subdomain_contents[local_ind];
+        i_cpu[domain] = grouping_method >= 0
+              ? groups[grouping_method].cpu_contents[groups[grouping_method].cpu_size_sum[group_id] + global_ind]
+              : global_ind;
+        species_found = atom.cpu_atom_symbol[i_cpu[domain]];
+        type_i_cpu[domain] = atom.cpu_type[i_cpu[domain]];
+      }
+      index_old_species_cpu[domain] = _index_old_species;
+      type_j_cpu[domain] = type_i_cpu[domain]; 
+      while (type_j_cpu[domain] == type_i_cpu[domain]) {
+        index_new_species_cpu[domain] = rand_int2(rng);
+        type_j_cpu[domain] = types[index_new_species_cpu[domain]];
+      }
+    }
+
+    GPU_Vector<int> i(N_domains);
+    GPU_Vector<int> type_i(N_domains);
+    GPU_Vector<int> type_j(N_domains);
+    GPU_Vector<int> index_new_species(N_domains);
+    GPU_Vector<int> index_old_species(N_domains);
+
+    i.copy_from_host(i_cpu.data());
+    type_i.copy_from_host(type_i_cpu.data());
+    type_j.copy_from_host(type_j_cpu.data());
+    index_new_species.copy_from_host(index_new_species_cpu.data());
+    index_old_species.copy_from_host(index_old_species_cpu.data());
+
+
+    get_neighbors_of_i_fastNEP<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(// TODO: переписать на быстрый вариант с cells
       atom.number_of_atoms,
       box,
-      i,
+      i.data(),
+      N_domains,
       nep_energy_fast.paramb.rc_radial * nep_energy_fast.paramb.rc_radial,
       atom.position_per_atom.data(),
       atom.position_per_atom.data() + atom.number_of_atoms,
@@ -391,26 +465,21 @@ void MC_Ensemble_SGC_fastNEP::compute(
       pe_nep_before_local.data());
     GPU_CHECK_KERNEL
 
-    int NN_ij_cpu;
-    NN_ij.copy_to_host(&NN_ij_cpu);
 
-    gpuMemcpy(&pe_nep_before_local.data()[NN_ij_cpu], &nep_energy_fast.nep_data.pe_nep.data()[i], sizeof(float), gpuMemcpyDeviceToDevice); 
-   
-    NN_angular_i.fill(0);
-    nep_energy_fast.nep_data.q_radial_local.fill(0.0f);
-    nep_energy_fast.nep_data.s_angular_local.fill(0.0f);
-    nep_energy_fast.nep_data.q_radial_i.fill(0.0f);
-    nep_energy_fast.nep_data.s_angular_i.fill(0.0f);
-    is_neigh_angular.fill(false);
 
-    t2_radial.fill(0);
-    x12_radial.fill(0.0f);
-    y12_radial.fill(0.0f);
-    z12_radial.fill(0.0f);
-    create_inputs_for_energy_calculator_fastNEP<<<((NN_ij_cpu + 1) - 1) / 64 + 1, 64>>>(// (NN_ij_cpu + 1) due to the fact that array[N_ij_cpu] contain information about central (i) atom
+    std::vector<int> NN_ij_cpu(N_domains);
+    NN_ij.copy_to_host(NN_ij_cpu.data());
+
+    for (int domain = 0; domain < N_domains; domain++){// TODO может быть стоит завести один массив для энергий центральных атомов или изменить его структуру - писать все в последнюю строчку (так же быстрее копирование?)
+      CHECK(gpuMemcpy(&pe_nep_before_local.data()[NN_ij_cpu[domain]], &nep_energy_fast.nep_data.pe_nep.data()[i[domain]], sizeof(float), gpuMemcpyDeviceToDevice)); 
+    }
+    
+
+    create_inputs_for_energy_calculator_fastNEP<<<(n_max*N_domains - 1) / 64 + 1, 64>>>(
       nep_energy_fast.paramb,
-      NN_ij_cpu,
-      i,
+      NN_ij_cpu.data(),
+      N_domains,
+      i.data(),
       NL_ij.data(),
       box,
       nep_energy_fast.paramb.rc_radial * nep_energy_fast.paramb.rc_radial,
@@ -430,17 +499,18 @@ void MC_Ensemble_SGC_fastNEP::compute(
       nep_energy_fast.nep_data.q_radial_local.data(),
       nep_energy_fast.nep_data.s_angular_local.data());
     GPU_CHECK_KERNEL
-    
-    nep_energy_fast.nep_data.q_radial_trial_local.fill(0.0f);
-    nep_energy_fast.nep_data.s_angular_trial_local.fill(0.0f);
-    delta_pe_zbl.fill(0.0f);
+  
+    //int N = std::accumulate(NN_ij_cpu.begin(), NN_ij_cpu.end(), 0);
+    const int N = n_max*N_domains;
 
     nep_energy_fast.find_energy( // calculate energy differences for neighbors of th central (i) atom after MC trial swap: delta_pe_nep, delta_pe_zbl
-      NN_ij_cpu,
-      i,
+      N_domains,
+      NN_ij_cpu.data(),
+      N,
+      i.data(),
       NN_angular_i.data(),
-      type_i,
-      type_j,
+      type_i.data(),
+      type_j.data(),
       t2_radial.data(),
       x12_radial.data(),
       y12_radial.data(),
@@ -449,76 +519,104 @@ void MC_Ensemble_SGC_fastNEP::compute(
       delta_pe_nep.data(),
       pe_nep_before_local.data(),
       delta_pe_zbl.data());
+
     
-    std::vector<float> delta_pe_nep_cpu(NN_ij_cpu+1);
-    delta_pe_nep.copy_to_host(delta_pe_nep_cpu.data(), NN_ij_cpu+1);
+    
+    std::vector<float> delta_pe_nep_cpu(N);
+    delta_pe_nep.copy_to_host(delta_pe_nep_cpu.data(), N);
 
-    float energy_difference = 0.0f;
-    for (int n = 0; n < NN_ij_cpu; ++n) {
-      energy_difference += delta_pe_nep_cpu[n];
+    std::vector<float> delta_pe_zbl_cpu(N);
+    delta_pe_zbl.copy_to_host(delta_pe_zbl_cpu.data(), N);
+
+    std::vector<float> energy_difference(N_domains, 0.0f);
+    for (int domain = 0; domain < N_domains; ++N_domains) {
+      for (int n = 0; n < NN_ij_cpu[domain]; ++n){
+        energy_difference[domain] += delta_pe_nep_cpu[n*N_domains + domain];
+        energy_difference[domain] += delta_pe_zbl_cpu[n*N_domains + domain];
+      }
     }
-    energy_difference += delta_pe_nep_cpu[NN_ij_cpu]; // delta energy of the central (i) atom
 
-    std::vector<float> delta_pe_zbl_cpu(NN_ij_cpu);
-    delta_pe_zbl.copy_to_host(delta_pe_zbl_cpu.data(), NN_ij_cpu);
-
-    for (int n = 0; n < NN_ij_cpu; ++n) {
-      energy_difference += delta_pe_zbl_cpu[n];
-    }
 
     #ifdef FAST_NEP_MC_TEST
       mc_debug_log << i << "; " << type_i << "; " << type_j << "; " << energy_difference  << std::endl;
     #endif
 
-    if (!is_vcsgc) {
-      energy_difference += mu_or_phi[index_new_species] - mu_or_phi[index_old_species];
-    } else {
-      energy_difference +=
-        kappa * K_B * temperature * 
-        (group_size * (mu_or_phi[index_new_species] - mu_or_phi[index_old_species]) +
-         (2.0 * num_atoms_species[index_new_species]  + 1.0));
+    std::uniform_real_distribution<float> r2(0, 1);
+    std::vector<bool> is_accepted(N_domains);
+    bool global_acceptance = true;
+
+    for (int domain = 0; domain < N_domains; ++domain){
+      energy_difference[domain] += mu_or_phi[index_new_species[domain]] - mu_or_phi[index_old_species[domain]];
+      if (is_vcsgc){ // TODO: кажется здесь ерунда щас написана
+        energy_difference[domain] += 2*kappa*num_atoms*(target_concentration[index_new_species[domain]]-target_concentration[index_old_species[domain]]);
+      }
+
+      float random_number = r2(rng);
+      float probability = exp(-energy_difference[domain] / (K_B * temperature));
+      #ifdef FAST_NEP_MC_TEST
+        probability = 0.5;
+      #endif
+      if (!(random_number < probability)) {
+        is_accepted[domain] = false;
+        energy_difference[domain] = 0.0f;
+      }
+      else {
+        is_accepted[domain] = true;
+      }
+    }
+
+    if (is_vcsgc) {
+      float exponent = 0.0f;
+      for (int domain = 0; domain < N_domains; ++domain){
+        exponent += kappa*num_atoms * (num_atoms_species[index_new_species[domain]]+1.0-target_concentration[index_new_species[domain]]); // TODO посчитать что там должно быть
+        exponent += kappa*num_atoms * (num_atoms_species[index_old_species[domain]]-1.0-target_concentration[index_old_species[domain]]); // TODO посчитать что там должно быть
+      }
+      float random_number = r2(rng);
+      float probability = exp(-exponent / (K_B * temperature));
+      global_acceptance = (random_number < probability);
     }
     
+    if (global_acceptance) {
+      for (int domain = 0; domain < N_domains; ++domain){
+        if (is_accepted[domain]){
+          ++num_accepted;
+          ++num_atoms_species[index_new_species[domain]];
+          --num_atoms_species[index_old_species[domain]];
 
-    std::uniform_real_distribution<float> r2(0, 1);
-    float random_number = r2(rng);
-    float probability = exp(-energy_difference / (K_B * temperature));
-    #ifdef FAST_NEP_MC_TEST
-      probability = 0.5;
-    #endif
-    
-    if (random_number < probability) {
-      ++num_accepted;
+          atom.cpu_type[i[domain]] = type_j[domain];
+          atom.cpu_atom_symbol[i[domain]] = species[index_new_species[domain]];
+          double mass_old = atom.cpu_mass[i[domain]];
+          double mass_new = MASS_TABLE.at(species[index_new_species[domain]]);
+          atom.cpu_mass[i[domain]] = mass_new;
 
-      ++num_atoms_species[index_new_species];
-      --num_atoms_species[index_old_species];
+          gpu_flip<<<1, 1>>>(
+            i[domain],
+            type_j[domain],
+            mass_new,
+            mass_old / mass_new,
+            atom.type.data(),
+            atom.mass.data(),
+            atom.velocity_per_atom.data(),
+            atom.velocity_per_atom.data() + atom.number_of_atoms,
+            atom.velocity_per_atom.data() + atom.number_of_atoms * 2);
+        }
+      }
 
-      atom.cpu_type[i] = type_j;
-      atom.cpu_atom_symbol[i] = species[index_new_species];
-      double mass_old = atom.cpu_mass[i];
-      double mass_new = MASS_TABLE.at(species[index_new_species]);
-      atom.cpu_mass[i] = mass_new;
-
-      gpu_flip<<<1, 1>>>(
-        i,
-        type_j,
-        mass_new,
-        mass_old / mass_new,
-        atom.type.data(),
-        atom.mass.data(),
-        atom.velocity_per_atom.data(),
-        atom.velocity_per_atom.data() + atom.number_of_atoms,
-        atom.velocity_per_atom.data() + atom.number_of_atoms * 2);
+      std::vector<char> temp_accepted(is_accepted.begin(), is_accepted.end());
+      g_is_accepted.copy_from_host(reinterpret_cast<const bool*>(temp_accepted.data()), N_domains);
 
       nep_energy_fast.accept_trial( // update stored values of descriptors and potential energies for NEP
-        NN_ij_cpu, 
+        N,
+        N_domains,
+        NN_ij.data(), 
+        g_is_accepted.data(),
         NL_ij.data(),
         delta_pe_nep.data(),
-        i);
+        i.data());
     }
   }
 
-  mc_output << md_step << "  " << num_accepted / double(num_steps_mc) << " ";
+  mc_output << md_step << "  " << num_accepted / double(num_steps_mc*N_domains) << " ";
   for (int t = 0; t < types.size(); ++t) {
     mc_output << num_atoms_species[t] / double(atom.number_of_atoms) << " ";
   }
