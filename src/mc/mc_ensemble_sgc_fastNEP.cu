@@ -334,8 +334,8 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
 
 // a kernel with a single thread <<<1, 1>>>
 static __global__ void gpu_flip(
-  const int& i,
-  const int& type_j,
+  const int i,
+  const int type_j,
   const double mass_j,
   const double mass_scaler,
   int* g_type,
@@ -375,6 +375,8 @@ void MC_Ensemble_SGC_fastNEP::compute(
     printf("Cannot use small box for MCMD.\n");
     exit(1);
   }
+
+
 
   int group_size =
     grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
@@ -620,7 +622,11 @@ void MC_Ensemble_SGC_fastNEP::compute(
     bool global_acceptance = true;
 
     for (int domain = 0; domain < N_domains; ++domain){
-      if (subdomain_is_empty[subdomains[subdomain_color][domain]]){is_accepted[domain] = false; continue;}
+      if (subdomain_is_empty[subdomains[subdomain_color][domain]])
+      {
+        is_accepted[domain] = false; 
+        continue;
+      }
       energy_difference[domain] += mu_or_phi[index_new_species_cpu[domain]] - mu_or_phi[index_old_species_cpu[domain]];
       if (is_vcsgc){ // TODO: кажется здесь ерунда щас написана
         energy_difference[domain] += 2*kappa*num_atoms*(target_concentration[index_new_species_cpu[domain]]-target_concentration[index_old_species_cpu[domain]]);
