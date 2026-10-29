@@ -289,7 +289,7 @@ void NEP_Energy_fast::initialize(
   nep_data.q_radial.resize(num_atoms * (paramb.n_max_radial + 1) ); // radial descriptors
   nep_data.s_angular.resize(num_atoms * (paramb.n_max_angular + 1) * NUM_OF_ABC); // angular descriptors (S values)
   nep_data.q_radial_local_size = n_max * (paramb.n_max_radial + 1) * N_domains; 
-  nep_data.s_angular_local_size = m_max * (paramb.n_max_angular + 1) * NUM_OF_ABC * N_domains;
+  nep_data.s_angular_local_size = n_max * (paramb.n_max_angular + 1) * NUM_OF_ABC * N_domains;
   nep_data.q_radial_local.resize(nep_data.q_radial_local_size); // radial descriptors of neighbors of the MC swappad atom
   nep_data.s_angular_local.resize(nep_data.s_angular_local_size); // angular descriptors of neighbors of the MC swappad atom
   nep_data.q_radial_trial_local.resize(nep_data.q_radial_local_size); // radial descriptors of the MC swappad atom after MC swap
@@ -1177,7 +1177,7 @@ static __device__ void find_subdomain_id(
     subdomain_id_z += nz;
   while (subdomain_id_z >= nz)
     subdomain_id_z -= nz;
-  subdomain_id = subdomain_id_x + nx * subdomain_id_y + n_domains[0] * ny * subdomain_id_z;
+  subdomain_id = subdomain_id_x + nx * subdomain_id_y + nx * ny * subdomain_id_z;
 }
 
 static __device__ void find_subdomain_id(

@@ -332,6 +332,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
 
     species.resize(num_types_mc);
     mu_or_phi.resize(num_types_mc);
+    target_conc.resize(num_types_mc, 0.0);
     for (int n = 0; n < num_types_mc; ++n) {
       species[n] = param[7 + n * 2];
       if (!is_valid_real(param[7 + n * 2 + 1], &mu_or_phi[n])) {
@@ -359,7 +360,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
 
     species.resize(num_types_mc);
     mu_or_phi.resize(num_types_mc);
-    target_conc.resize(num_types_mc, 0.0);
+    target_conc.resize(num_types_mc);
     for (int n = 0; n < num_types_mc; ++n) {
       species[n] = param[7 + n * 3];
       if (!is_valid_real(param[7 + n * 3 + 1], &mu_or_phi[n])) {
@@ -428,7 +429,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     if (!is_valid_int(param[9 + num_types_mc * 2], &Nz_domains)) {
       PRINT_INPUT_ERROR("number of domains should be an integer.\n");
     }
-    if (Nx_domains < 0 || Ny_domains < 0 || Nz_domains < 0) {
+    if (Nx_domains <= 0 || Ny_domains <= 0 || Nz_domains <= 0) {
       PRINT_INPUT_ERROR("number of domains should be positive.\n");
     }
     printf("    number of domains = (%d, %d, %d)\n", Nx_domains, Ny_domains, Nz_domains);
@@ -451,6 +452,12 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     }
     parse_group(param, num_param, groups, num_param_before_group);
     printf("    only for atoms in group %d of grouping method %d.\n", group_id, grouping_method);
+  }
+
+  if (mc_ensemble_type == 5 || mc_ensemble_type == 6){
+    if (grouping_method >= 0){
+      PRINT_INPUT_ERROR("grouping unsuported in MCMD parallel now! Groups will be ignored");
+    }
   }
 
   types.resize(num_types_mc);

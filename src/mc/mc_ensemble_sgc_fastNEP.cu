@@ -199,6 +199,7 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
 MC_Ensemble_SGC_fastNEP::~MC_Ensemble_SGC_fastNEP(void) { mc_output.close(); }
 
 static __global__ void get_neighbors_of_i_fastNEP(
+  const int n_max,
   const int N,
   const Box box,
   const int* i,
@@ -232,9 +233,12 @@ static __global__ void get_neighbors_of_i_fastNEP(
         float distance_square_i = float(x0i * x0i + y0i * y0i + z0i * z0i);
 
         if (distance_square_i < rc_radial_square) {
-          int index = atomicAdd(&g_NN_i[domain], 1)*N_domains + domain;
-          g_pe_nep_before_local[index] = pe_n; 
-          g_NL_i[index] = n;
+          int k = atomicAdd(&g_NN_i[domain], 1);
+          if (k < n_max) {
+            int index = k * N_domains + domain;
+            g_pe_nep_before_local[index] = pe_n; 
+            g_NL_i[index] = n;
+          }
         }        
       }
     }
@@ -411,18 +415,18 @@ void MC_Ensemble_SGC_fastNEP::compute(
     subdomains[color].push_back(domain);
   }
   for (int color=0; color<8; ++color){
-    if (subdomains[color].size()!=N_domains){
-      printf("Wrong number of subdomains (may be there are empty subdomain).\n");
+    if (subdomains[color].size() != N_domains){
+      printf("Wrong number of subdomains.\n");
       exit(1);
     }
   }
 
   int num_accepted = 0;
-  int num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
-  num_steps_mc = ((num_steps_mc - 1) / N_domains + 1);
+  int num_trials = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
+  num_trials = ((num_trials - 1) / N_domains + 1);
 
   #ifdef FAST_NEP_MC_TEST
-    mc_debug_log << "# VCSGC fastNEP; number of micro MC steps: " << num_steps_mc << std::endl;
+    mc_debug_log << "# VCSGC fastNEP; number of micro MC steps: " << num_trials << std::endl;
     mc_debug_log << "# domain; i; type_i; type_j; energy_difference" << std::endl;
   #endif
 
@@ -442,7 +446,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
   GPU_Vector<int> index_new_species(N_domains);
   GPU_Vector<int> index_old_species(N_domains);
 
-  for (int step = 0; step < num_steps_mc; ++step) {
+  for (int step = 0; step < num_trials; ++step) {
     NN_ij.fill(0);
     pe_nep_before_local.fill(0.0f);
     NN_angular_i.fill(0);
@@ -478,14 +482,12 @@ void MC_Ensemble_SGC_fastNEP::compute(
               : global_ind;
          */ //TODO сделать проход в find_subdomains_list только по группе
         i_cpu[domain] = global_ind;
-        if (grouping_method >= 0){
-          printf("[ERROR]: grouping unsuported in MCMD parallel now! Groups will be ignored");
-        }
         species_found = atom.cpu_atom_symbol[i_cpu[domain]];
         type_i_cpu[domain] = atom.cpu_type[i_cpu[domain]];
         if (++count > max_tries)
         {
           printf("[WARNING] Cannot suggest trial step for current domain: number of allowed species in MC is zero in the domain or very small! Skip MC step in this domain");
+          i_cpu[domain] = -1;
           subdomain_is_empty[subdomains[subdomain_color][domain]] = true;
           break;
         }
@@ -506,6 +508,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
 
     get_neighbors_of_i_fastNEP<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(// TODO: переписать на быстрый вариант с cells
+      n_max,
       atom.number_of_atoms,
       box,
       i.data(),
@@ -690,7 +693,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     }
   }
 
-  mc_output << md_step << "  " << num_accepted / double(num_steps_mc*N_domains) << " ";
+  mc_output << md_step << "  " << num_accepted / double(num_trials*N_domains) << " ";
   for (int t = 0; t < types.size(); ++t) {
     mc_output << num_atoms_species[t] / double(atom.number_of_atoms) << " ";
   }
