@@ -359,7 +359,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
 
     species.resize(num_types_mc);
     mu_or_phi.resize(num_types_mc);
-    target_conc.resize(num_types_mc);
+    target_conc.resize(num_types_mc, 0.0);
     for (int n = 0; n < num_types_mc; ++n) {
       species[n] = param[7 + n * 3];
       if (!is_valid_real(param[7 + n * 3 + 1], &mu_or_phi[n])) {

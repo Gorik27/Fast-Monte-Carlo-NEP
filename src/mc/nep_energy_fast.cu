@@ -685,6 +685,7 @@ void NEP_Energy_fast::find_energy(
     nep_data.s_angular_local.data(),
     nep_data.q_radial_trial_local.data(),
     nep_data.s_angular_trial_local.data());
+    GPU_CHECK_KERNEL
 
     if (zbl.enabled){
       find_energy_zbl<<<(N - 1) / 64 + 1, 64>>>( // find energy change of ZBL
@@ -1146,12 +1147,8 @@ static __device__ void find_subdomain_id(
   const double x,
   const double y,
   const double z,
-  const double lx_inv,
-  const double ly_inv,
-  const double lz_inv,
-  const int nx,
-  const int ny,
-  const int nz,
+  const double* l_inv,
+  const int* n_domains,
   int& subdomain_id_x,
   int& subdomain_id_y,
   int& subdomain_id_z,
@@ -1160,9 +1157,13 @@ static __device__ void find_subdomain_id(
   const double sx = box.cpu_h[9] * x + box.cpu_h[10] * y + box.cpu_h[11] * z;
   const double sy = box.cpu_h[12] * x + box.cpu_h[13] * y + box.cpu_h[14] * z;
   const double sz = box.cpu_h[15] * x + box.cpu_h[16] * y + box.cpu_h[17] * z;
-  subdomain_id_x = floor(sx * box.thickness_x * lx_inv);
-  subdomain_id_y = floor(sy * box.thickness_y * ly_inv);
-  subdomain_id_z = floor(sz * box.thickness_z * lz_inv);
+  subdomain_id_x = floor(sx * box.thickness_x * l_inv[0]);
+  subdomain_id_y = floor(sy * box.thickness_y * l_inv[1]);
+  subdomain_id_z = floor(sz * box.thickness_z * l_inv[2]);
+
+  int nx = 2*n_domains[0];
+  int ny = 2*n_domains[1];
+  int nz = 2*n_domains[2];
 
   while (subdomain_id_x < 0)
     subdomain_id_x += nx;
@@ -1176,7 +1177,7 @@ static __device__ void find_subdomain_id(
     subdomain_id_z += nz;
   while (subdomain_id_z >= nz)
     subdomain_id_z -= nz;
-  subdomain_id = subdomain_id_x + nx * subdomain_id_y + nx * ny * subdomain_id_z;
+  subdomain_id = subdomain_id_x + nx * subdomain_id_y + n_domains[0] * ny * subdomain_id_z;
 }
 
 static __device__ void find_subdomain_id(
@@ -1184,17 +1185,13 @@ static __device__ void find_subdomain_id(
   const double x,
   const double y,
   const double z,
-  const double lx_inv,
-  const double ly_inv,
-  const double lz_inv,
-  const int nx,
-  const int ny,
-  const int nz,
+  const double* l_inv,
+  const int* n_domains,
   int& subdomain_id
 )
 {
   int subdomain_id_x, subdomain_id_y, subdomain_id_z;
-  find_subdomain_id(box, x, y, z, lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
+  find_subdomain_id(box, x, y, z, l_inv, n_domains, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
 }
 
 static __global__ void find_subdomain_counts(
@@ -1204,17 +1201,13 @@ static __global__ void find_subdomain_counts(
   const double* x,
   const double* y,
   const double* z,
-  const int nx,
-  const int ny,
-  const int nz,
-  const double lx_inv,
-  const double ly_inv,
-  const double lz_inv)
+  const int* n_domains,
+  const double* l_inv)
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int subdomain_id;
-    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id);
+    find_subdomain_id(box, x[n1], y[n1], z[n1], l_inv, n_domains, subdomain_id);
     atomicAdd(&subdomain_count[subdomain_id], 1);
   }
 }
@@ -1228,17 +1221,13 @@ static __global__ void find_subdomain_contents(
   const double* x,
   const double* y,
   const double* z,
-  const int nx,
-  const int ny,
-  const int nz,
-  const double lx_inv,
-  const double ly_inv,
-  const double lz_inv)
+  const int* n_domains,
+  const double* l_inv)
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int subdomain_id;
-    find_subdomain_id(box, x[n1], y[n1], z[n1], lx_inv, ly_inv, lz_inv, nx, ny, nz, subdomain_id);
+    find_subdomain_id(box, x[n1], y[n1], z[n1], l_inv, n_domains, subdomain_id);
     const int ind = atomicAdd(&subdomain_count[subdomain_id], 1);
     subdomain_contents[subdomain_count_sum[subdomain_id] + ind] = n1;
   }
@@ -1289,12 +1278,8 @@ void NEP_Energy_fast::find_subdomain_list(
         x, 
         y, 
         z, 
-        2*nep_data.num_domains[0], 
-        2*nep_data.num_domains[1], 
-        2*nep_data.num_domains[2],
-        nep_data.subdomain_inv_size[0],
-        nep_data.subdomain_inv_size[1],
-        nep_data.subdomain_inv_size[2]);
+        nep_data.num_domains.data(),
+        nep_data.subdomain_inv_size.data());
       GPU_CHECK_KERNEL
 
       thrust::exclusive_scan(
@@ -1311,11 +1296,7 @@ void NEP_Energy_fast::find_subdomain_list(
         x,
         y,
         z,
-        2*nep_data.num_domains[0],
-        2*nep_data.num_domains[1],
-        2*nep_data.num_domains[2],
-        nep_data.subdomain_inv_size[0],
-        nep_data.subdomain_inv_size[1],
-        nep_data.subdomain_inv_size[2]);
+        nep_data.num_domains.data(),
+        nep_data.subdomain_inv_size.data());
       GPU_CHECK_KERNEL
     }
