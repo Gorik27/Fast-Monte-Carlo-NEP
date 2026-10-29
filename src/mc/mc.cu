@@ -25,6 +25,8 @@ The driver class for the various MC ensembles.
 #include "utilities/common.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/read_file.cuh"
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 void MC::initialize(void)
@@ -40,13 +42,185 @@ void MC::initialize(void)
 
 void MC::finalize(void) { do_mcmd = false; }
 
+#ifdef MC_TEST
+namespace
+{
+// Complete state of the atoms that can be changed by an MC step
+struct MC_TestSnapshot {
+  std::vector<int> cpu_type;
+  std::vector<std::string> cpu_symbol;
+  std::vector<double> cpu_mass;
+  std::vector<int> gpu_type;
+  std::vector<double> gpu_mass;
+  std::vector<double> gpu_velocity;
+
+  void save(Atom& atom)
+  {
+    cpu_type = atom.cpu_type;
+    cpu_symbol = atom.cpu_atom_symbol;
+    cpu_mass = atom.cpu_mass;
+    gpu_type.resize(atom.type.size());
+    gpu_mass.resize(atom.mass.size());
+    gpu_velocity.resize(atom.velocity_per_atom.size());
+    atom.type.copy_to_host(gpu_type.data());
+    atom.mass.copy_to_host(gpu_mass.data());
+    atom.velocity_per_atom.copy_to_host(gpu_velocity.data());
+  }
+
+  void restore(Atom& atom) const
+  {
+    atom.cpu_type = cpu_type;
+    atom.cpu_atom_symbol = cpu_symbol;
+    atom.cpu_mass = cpu_mass;
+    atom.type.copy_from_host(gpu_type.data());
+    atom.mass.copy_from_host(gpu_mass.data());
+    atom.velocity_per_atom.copy_from_host(gpu_velocity.data());
+  }
+};
+} // namespace
+
+// One MC call of the parallel implementation, checked against the original implementation:
+//  1. save the state, run the parallel MC (all trial swaps are logged in mc_test_steps);
+//  2. save the resulting state, restore the initial state;
+//  3. replay the logged swaps with the original SGC code: for every swap the energy change is
+//     recomputed from scratch and compared with the logged one, accepted swaps are applied;
+//  4. compare the final state of the replay with the result of the parallel run.
+// The result of the parallel run is kept, so that the MD continues as without the test.
+void MC::run_test(
+  int md_step, double temperature, Atom& atom, Box& box, std::vector<Group>& group)
+{
+  MC_TestSnapshot before, after, replayed;
+  before.save(atom);
+
+  mc_ensemble->mc_test_steps.clear();
+  mc_ensemble->compute(md_step, temperature, atom, box, group, grouping_method, group_id);
+  const std::vector<MC_TestStep> steps = mc_ensemble->mc_test_steps;
+  after.save(atom);
+  const MC_TestCacheReport cache = mc_ensemble->test_check_cache(atom, box);
+
+  before.restore(atom);
+  MC_TestReport report =
+    mc_ensemble_ref->replay_steps(steps, atom, box, MC_TEST_ATOL, MC_TEST_RTOL);
+  replayed.save(atom);
+
+  // final states must be identical (types, symbols, masses)
+  int num_state_diff = 0;
+  for (int n = 0; n < atom.number_of_atoms; ++n) {
+    if (replayed.cpu_type[n] != after.cpu_type[n] || replayed.cpu_symbol[n] != after.cpu_symbol[n] ||
+        replayed.cpu_mass[n] != after.cpu_mass[n] || replayed.gpu_type[n] != after.gpu_type[n]) {
+      ++num_state_diff;
+    }
+  }
+  // the host and the device copies of the types must agree as well
+  int num_host_device_diff = 0;
+  for (int n = 0; n < atom.number_of_atoms; ++n) {
+    if (after.cpu_type[n] != after.gpu_type[n]) {
+      ++num_host_device_diff;
+    }
+  }
+
+  // number of atoms of every species: own counters of both ensembles vs real count
+  std::vector<int> counted(species.size(), 0);
+  for (int n = 0; n < atom.number_of_atoms; ++n) {
+    for (size_t s = 0; s < species.size(); ++s) {
+      if (after.cpu_symbol[n] == species[s]) {
+        ++counted[s];
+      }
+    }
+  }
+  const std::vector<int> counts_par = mc_ensemble->test_num_atoms_species();
+  const std::vector<int> counts_ref = mc_ensemble_ref->test_num_atoms_species();
+  int num_count_fail = 0;
+  for (size_t s = 0; s < species.size(); ++s) {
+    if (counts_par.size() == species.size() && counts_par[s] != counted[s]) {
+      ++num_count_fail;
+    }
+    if (counts_ref.size() == species.size() && counts_ref[s] != counted[s]) {
+      ++num_count_fail;
+    }
+  }
+
+  // momentum of every atom (m * v) must not change when the species (mass) is changed
+  const int N_atoms = atom.number_of_atoms;
+  double max_dp = 0.0;
+  double p_scale = 0.0;
+  for (int n = 0; n < N_atoms; ++n) {
+    for (int c = 0; c < 3; ++c) {
+      const double p_before = before.gpu_mass[n] * before.gpu_velocity[n + c * N_atoms];
+      const double p_after = after.gpu_mass[n] * after.gpu_velocity[n + c * N_atoms];
+      max_dp = std::max(max_dp, std::fabs(p_after - p_before));
+      p_scale = std::max(p_scale, std::fabs(p_before));
+    }
+  }
+  const bool momentum_ok = max_dp <= 1.0e-9 * p_scale;
+  const bool cache_ok =
+    !cache.checked || (cache.num_pe_fail == 0 && cache.num_q_fail == 0 && cache.num_s_fail == 0);
+
+  const bool ok = report.num_energy_fail == 0 && report.num_type_fail == 0 &&
+                  num_state_diff == 0 && num_host_device_diff == 0 && cache_ok &&
+                  num_count_fail == 0 && momentum_ok;
+  if (!ok) {
+    ++test_num_bad_calls;
+  }
+
+  printf(
+    "[MC_TEST] md_step %d: %s | steps %d, applied %d | energy fails %d, type fails %d | "
+    "max |dE diff| = %.3e eV (rel %.3e) | final state differences %d | host/device type "
+    "differences %d | bad calls so far: %d\n",
+    md_step,
+    ok ? "PASSED" : "FAILED",
+    report.num_steps,
+    report.num_applied,
+    report.num_energy_fail,
+    report.num_type_fail,
+    report.max_abs_err,
+    report.max_rel_err,
+    num_state_diff,
+    num_host_device_diff,
+    test_num_bad_calls);
+  printf(
+    "[MC_TEST]   cache: %s (pe fails %d, max %.3e eV, sum diff %.3e eV; q fails %d, max %.3e; "
+    "s fails %d, max %.3e) | species counters: %s | momentum: %s (max |dp| %.3e, scale %.3e)\n",
+    !cache.checked ? "not checked" : (cache_ok ? "OK" : "FAILED"),
+    cache.num_pe_fail,
+    cache.max_pe_err,
+    cache.total_pe_diff,
+    cache.num_q_fail,
+    cache.max_q_err,
+    cache.num_s_fail,
+    cache.max_s_err,
+    num_count_fail == 0 ? "OK" : "FAILED",
+    momentum_ok ? "OK" : "FAILED",
+    max_dp,
+    p_scale);
+  printf(
+    "[MC_TEST]   max |dE diff| by fifth of the MC call (drift check): %.2e %.2e %.2e %.2e %.2e eV\n",
+    report.max_abs_err_bin[0],
+    report.max_abs_err_bin[1],
+    report.max_abs_err_bin[2],
+    report.max_abs_err_bin[3],
+    report.max_abs_err_bin[4]);
+
+  // continue MD from the result of the parallel run
+  after.restore(atom);
+}
+#endif
+
 void MC::compute(int step, int num_steps, Atom& atom, Box& box, std::vector<Group>& group)
 {
   if (do_mcmd) {
     if ((step + 2) % num_steps_md == 0) {
       double temperature =
         temperature_initial + step * (temperature_final - temperature_initial) / num_steps;
+#ifdef MC_TEST
+      if (mc_ensemble_ref) {
+        run_test(step + 2, temperature, atom, box, group);
+      } else {
+        mc_ensemble->compute(step + 2, temperature, atom, box, group, grouping_method, group_id);
+      }
+#else
       mc_ensemble->compute(step + 2, temperature, atom, box, group, grouping_method, group_id);
+#endif
     }
   }
 }
@@ -491,6 +665,15 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
       atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   }
+
+#ifdef MC_TEST
+  if (mc_ensemble_type >= 3) { // parallel/fast implementations are checked against the original SGC
+    std::vector<int> num_atoms_species_ref = num_atoms_species;
+    mc_ensemble_ref.reset(new MC_Ensemble_SGC(
+      param, num_param, 1, false, species, types, num_atoms_species_ref, mu_or_phi, kappa));
+    printf("MC_TEST is on: every MC call of the fast/parallel implementation is replayed with the original SGC implementation.\n");
+  }
+#endif
 
   do_mcmd = true;
 }

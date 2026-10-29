@@ -55,6 +55,11 @@ public:
     int grouping_method,
     int group_id);
 
+#ifdef MC_TEST
+  virtual std::vector<int> test_num_atoms_species() const { return num_atoms_species; }
+  virtual MC_TestCacheReport test_check_cache(Atom& atom, Box& box);
+#endif
+
 private:
   GPU_Vector<int> NN_ij;
   GPU_Vector<int> NL_ij;

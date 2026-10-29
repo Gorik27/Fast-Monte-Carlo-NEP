@@ -334,8 +334,8 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
 
 // a kernel with a single thread <<<1, 1>>>
 static __global__ void gpu_flip(
-  const int i,
-  const int type_j,
+  const int& i,
+  const int& type_j,
   const double mass_j,
   const double mass_scaler,
   int* g_type,
@@ -375,8 +375,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
     printf("Cannot use small box for MCMD.\n");
     exit(1);
   }
-
-
 
   int group_size =
     grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
@@ -606,6 +604,11 @@ void MC_Ensemble_SGC_fastNEP::compute(
     }
 
 
+    #ifdef MC_TEST
+      // pure potential energy change (NEP + ZBL) of every domain, before mu/phi/kappa terms are added
+      const std::vector<float> dE_potential_cpu = energy_difference;
+    #endif
+
     #ifdef FAST_NEP_MC_TEST
       for (int domain = 0; domain < N_domains; ++domain){
         if (subdomain_is_empty[subdomains[subdomain_color][domain]]) {
@@ -622,11 +625,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     bool global_acceptance = true;
 
     for (int domain = 0; domain < N_domains; ++domain){
-      if (subdomain_is_empty[subdomains[subdomain_color][domain]])
-      {
-        is_accepted[domain] = false; 
-        continue;
-      }
+      if (subdomain_is_empty[subdomains[subdomain_color][domain]]){is_accepted[domain] = false; continue;}
       energy_difference[domain] += mu_or_phi[index_new_species_cpu[domain]] - mu_or_phi[index_old_species_cpu[domain]];
       if (is_vcsgc){ // TODO: кажется здесь ерунда щас написана
         energy_difference[domain] += 2*kappa*num_atoms*(target_concentration[index_new_species_cpu[domain]]-target_concentration[index_old_species_cpu[domain]]);
@@ -658,6 +657,25 @@ void MC_Ensemble_SGC_fastNEP::compute(
       global_acceptance = (random_number < probability);
     }
     
+    #ifdef MC_TEST
+      // log all trial swaps of this composite move; they are replayed by the original SGC code
+      for (int domain = 0; domain < N_domains; ++domain) {
+        if (subdomain_is_empty[subdomains[subdomain_color][domain]] || i_cpu[domain] < 0) {continue;}
+        MC_TestStep s;
+        s.md_step = md_step;
+        s.trial = step;
+        s.domain = domain;
+        s.i = i_cpu[domain];
+        s.type_i = type_i_cpu[domain];
+        s.type_j = type_j_cpu[domain];
+        s.index_old_species = index_old_species_cpu[domain];
+        s.index_new_species = index_new_species_cpu[domain];
+        s.dE_potential = dE_potential_cpu[domain];
+        s.applied = global_acceptance && is_accepted[domain];
+        mc_test_steps.push_back(s);
+      }
+    #endif
+
     if (global_acceptance) {
       for (int domain = 0; domain < N_domains; ++domain){
         if (subdomain_is_empty[subdomains[subdomain_color][domain]]){continue;}
@@ -705,3 +723,54 @@ void MC_Ensemble_SGC_fastNEP::compute(
   }
   mc_output << std::endl;
 }
+
+#ifdef MC_TEST
+// Compare the cached per-atom energies and descriptors (updated incrementally by accept_trial)
+// with a complete recalculation. Note: this overwrites the cache with the fresh values, which is
+// harmless because compute() recalculates everything at the start of every MC call.
+MC_TestCacheReport MC_Ensemble_SGC_fastNEP::test_check_cache(Atom& atom, Box& box)
+{
+  MC_TestCacheReport report;
+  report.checked = true;
+  auto& data = nep_energy_fast.nep_data;
+
+  std::vector<float> pe_cached(data.pe_nep.size());
+  std::vector<float> q_cached(data.q_radial.size());
+  std::vector<float> s_cached(data.s_angular.size());
+  data.pe_nep.copy_to_host(pe_cached.data());
+  data.q_radial.copy_to_host(q_cached.data());
+  data.s_angular.copy_to_host(s_cached.data());
+
+  nep_energy_fast.compute_large_box(box, atom.type, atom.position_per_atom);
+
+  std::vector<float> pe_fresh(pe_cached.size());
+  std::vector<float> q_fresh(q_cached.size());
+  std::vector<float> s_fresh(s_cached.size());
+  data.pe_nep.copy_to_host(pe_fresh.data());
+  data.q_radial.copy_to_host(q_fresh.data());
+  data.s_angular.copy_to_host(s_fresh.data());
+
+  auto compare = [](const std::vector<float>& cached,
+                    const std::vector<float>& fresh,
+                    const double atol,
+                    const double rtol,
+                    int& num_fail,
+                    double& max_err) {
+    for (size_t k = 0; k < cached.size(); ++k) {
+      const double err = std::fabs(double(cached[k]) - double(fresh[k]));
+      max_err = std::max(max_err, err);
+      if (err > atol + rtol * std::fabs(double(fresh[k]))) {
+        ++num_fail;
+      }
+    }
+  };
+  compare(pe_cached, pe_fresh, MC_TEST_ATOL, MC_TEST_RTOL, report.num_pe_fail, report.max_pe_err);
+  compare(q_cached, q_fresh, MC_TEST_DESC_TOL, MC_TEST_DESC_TOL, report.num_q_fail, report.max_q_err);
+  compare(s_cached, s_fresh, MC_TEST_DESC_TOL, MC_TEST_DESC_TOL, report.num_s_fail, report.max_s_err);
+
+  for (size_t k = 0; k < pe_cached.size(); ++k) {
+    report.total_pe_diff += double(pe_cached[k]) - double(pe_fresh[k]);
+  }
+  return report;
+}
+#endif

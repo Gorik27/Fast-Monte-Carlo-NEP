@@ -16,6 +16,7 @@
 #pragma once
 
 #include "mc_ensemble.cuh"
+#include "mc_ensemble_sgc.cuh"
 #include "model/box.cuh"
 #include "model/group.cuh"
 #include <memory>
@@ -50,6 +51,13 @@ private:
   std::vector<int> num_atoms_species;
   std::vector<double> mu_or_phi;
   std::vector<double> target_conc;
+
+#ifdef MC_TEST
+  // Reference (original) SGC implementation used to replay the steps of the parallel one
+  std::unique_ptr<MC_Ensemble_SGC> mc_ensemble_ref;
+  int test_num_bad_calls = 0;
+  void run_test(int md_step, double temperature, Atom& atom, Box& box, std::vector<Group>& group);
+#endif
 
   void parse_group(
     const char** param, int num_param, std::vector<Group>& groups, int num_param_before_group);

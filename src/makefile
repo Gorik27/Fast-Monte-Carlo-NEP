@@ -21,7 +21,8 @@ CUDA_ARCH=-arch=sm_120
 ifdef OS # For Windows with the cl.exe compiler
 CFLAGS = -O3 $(CUDA_ARCH)
 else # For linux
-CFLAGS = -std=c++17 -ccbin /usr/bin/gcc-11 -O3 $(CUDA_ARCH) #-DDEBUG -DFAST_NEP_MC_TEST #  -g -G 
+CFLAGS = -std=c++17 -ccbin /usr/bin/gcc-11 -O3 $(CUDA_ARCH) #-DDEBUG -DFAST_NEP_MC_TEST #  -g -G
+CFLAGS += -DMC_TEST 
 endif
 INC = -I./
 LDFLAGS = 
@@ -83,7 +84,12 @@ HEADERS =                         \
 ###########################################################
 # executables
 ###########################################################
-all: gpumd nep 
+all: gpumd nep
+gpumd_test: $(OBJ_GPUMD)
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+	@echo =================================================
+	@echo The gpumd_test executable is successfully compiled!
+	@echo ================================================= 
 gpumd_parallel: $(OBJ_GPUMD)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 	@echo =================================================
