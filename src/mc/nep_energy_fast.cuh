@@ -38,8 +38,6 @@ struct NEP_Fast_Data {
   GPU_Vector<float> s_angular; // per-atom "s" part of the angular descriptor components
   GPU_Vector<float> q_radial_local; // *** todo *** it is good to make this a pointer to global array // per-atom radial descriptor components (loacl array only for neighbors of MC swapped atom)
   GPU_Vector<float> s_angular_local; // per-atom "s" part of the angular descriptor components (loсal array only for neighbors of MC swapped atom)
-  GPU_Vector<float> q_radial_i; // array with per-neighbor components of radial descriptor of the central atom (i) 
-  GPU_Vector<float> s_angular_i; // array with per-neighbor components of angular descriptor of the central atom (i) 
   GPU_Vector<float> q_radial_trial_local; 
   int q_radial_local_size;
   GPU_Vector<float> s_angular_trial_local;
@@ -50,7 +48,6 @@ struct NEP_Fast_Data {
   GPU_Vector<int> num_domains;
   GPU_Vector<double> subdomain_inv_size;
   GPU_Vector<int> subdomain_count;
-  GPU_Vector<int> subdomain_color;
   GPU_Vector<int> subdomain_count_sum;
   GPU_Vector<int> subdomain_contents;
 
@@ -124,6 +121,8 @@ public:
   NEP_Fast_Data nep_data;
   ExpandedBox ebox;
   int num_atoms;
+  int N_domains;
+  int N_subdomains;
 
   NEP_Energy_fast (void);
   ~NEP_Energy_fast (void);

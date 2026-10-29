@@ -23,6 +23,9 @@ public:
   int Nx_domains;
   int Ny_domains;
   int Nz_domains;
+  int Nx_subdomains;
+  int Ny_subdomains;
+  int Nz_subdomains;
   int N_domains;
   int N_subdomains;
 
@@ -71,6 +74,17 @@ private:
   GPU_Vector<int> t2_radial;
   GPU_Vector<bool> is_neigh_angular;
   GPU_Vector<bool> g_is_accepted;
+  GPU_Vector<float> x12_radial;
+  GPU_Vector<float> y12_radial;
+  GPU_Vector<float> z12_radial;
 
   bool allowed_species(std::string& species_found);
+
+  int color_of(int i) const
+  {
+    int ix =  i % Nx_subdomains;
+    int iy = (i / Nx_subdomains) % Ny_subdomains;
+    int iz =  i / (Nx_subdomains * Ny_subdomains);
+    return (ix & 1) * 4 + (iy & 1) * 2 + (iz & 1);
+  }
 };

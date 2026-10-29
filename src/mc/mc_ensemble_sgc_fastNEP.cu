@@ -33,6 +33,7 @@ integration across phase boundaries, Phys. Rev. B 86, 134204 (2012).
 #include <cstring>
 #include <cmath>
 #include <array>
+#include <algorithm> 
 
 const std::map<std::string, double> MASS_TABLE{
   {"H", 1.0080000000},
@@ -157,7 +158,13 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
   : MC_Ensemble(param, num_param, num_atoms_input, Nx_domains_input, Ny_domains_input, Nz_domains_input)
 {
   num_atoms = num_atoms_input;
-  N_domains = Nx_domains_input * Ny_domains_input * Nz_domains_input;
+  Nx_domains = Nx_domains_input;
+  Ny_domains = Ny_domains_input;
+  Nz_domains = Nz_domains_input;
+  Nx_subdomains = Nx_domains*2;
+  Ny_subdomains = Ny_domains*2;
+  Nz_subdomains = Nz_domains*2;
+  N_domains = Nx_domains * Ny_domains * Nz_domains;
   N_subdomains = N_domains*8;
   swap_fraction_mc = swap_fraction_mc_input;
   is_vcsgc = is_vcsgc_input;
@@ -173,6 +180,19 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
                   host_domains, 
                   3 * sizeof(int), 
                   gpuMemcpyHostToDevice)); 
+
+  NN_ij.resize(N_domains);
+  NL_ij.resize(n_max * N_domains);
+  NN_angular_i.resize(N_domains);
+  pe_nep_before_local.resize(n_max * N_domains);
+  delta_pe_nep.resize(n_max * N_domains);
+  delta_pe_zbl.resize(n_max * N_domains);
+  t2_radial.resize(n_max * N_domains);
+  x12_radial.resize(n_max * N_domains);   
+  y12_radial.resize(n_max * N_domains);   
+  z12_radial.resize(n_max * N_domains);   
+  is_neigh_angular.resize(n_max * N_domains);
+  g_is_accepted.resize(N_domains);
 
 }
 
@@ -363,42 +383,66 @@ void MC_Ensemble_SGC_fastNEP::compute(
     atom.position_per_atom);// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
     // TODO: реализовать случайное смещение начала отсчета чтобы убрать корреляции из-за границ доменов
 
-  std::array<std::vector<int>, 8> subdomains;
+  std::vector<int> subdomain_contents_cpu(nep_energy_fast.nep_data.subdomain_contents.size());
+  nep_energy_fast.nep_data.subdomain_contents.copy_to_host(subdomain_contents_cpu.data());
+  std::vector<int> subdomain_count_sum_cpu(nep_energy_fast.nep_data.subdomain_count_sum.size());
+  nep_energy_fast.nep_data.subdomain_count_sum.copy_to_host(subdomain_count_sum_cpu.data());
 
-  std::vector<std::uniform_int_distribution<int>> r1;
-  r1.reserve(N_subdomains);
-  for (int i = 0; i < N_subdomains; ++i) {
-    int size = nep_energy_fast.nep_data.subdomain_count[i];
+  std::array<std::vector<int>, 8> subdomains;
+  std::vector<std::uniform_int_distribution<int>> r1(N_subdomains);
+  std::vector<bool> domain_is_empty(N_domains);
+
+  for (int domain = 0; domain < N_subdomains; ++domain) {
+    int size = nep_energy_fast.nep_data.subdomain_count[domain];
     if (size == 0) {
-      r1.emplace_back(0, 0);
+      r1.emplace_back(-1, -1);
+      domain_is_empty[domain] = true;
     }
     else {
       r1.emplace_back(0, size - 1);
+      domain_is_empty[domain] = false;
     }
-    int color =  nep_energy_fast.nep_data.subdomain_color[i];
-    subdomains[color].push_back(i);
+    int color = color_of(domain);
+    subdomains[color].push_back(domain);
+  }
+  for (int color=0; color<8; ++color){
+    if (subdomains[color].size()!=N_domains){
+      printf("Wrong number of subdomains (may be there are empty subdomain).\n");
+      exit(1);
+    }
   }
 
   int num_accepted = 0;
   int num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
-  
+  num_steps_mc = ((num_steps_mc - 1) / N_domains + 1);
+
   #ifdef FAST_NEP_MC_TEST
     mc_debug_log << "# VCSGC fastNEP; number of micro MC steps: " << num_steps_mc << std::endl;
-    mc_debug_log << "# i; type_i; type_j; energy_difference" << std::endl;
+    mc_debug_log << "# domain; i; type_i; type_j; energy_difference" << std::endl;
   #endif
 
   std::uniform_int_distribution<int> color(0, 7);
 
   std::uniform_int_distribution<int> rand_int2(0, types.size() - 1);
 
-  for (int step = 0; step < (num_steps_mc-1)/N_domains+1; ++step) {
+  std::vector<int> i_cpu(N_domains, -1);
+  std::vector<int> type_i_cpu(N_domains, -1);
+  std::vector<int> type_j_cpu(N_domains);
+  std::vector<int> index_new_species_cpu(N_domains);
+  std::vector<int> index_old_species_cpu(N_domains);
+
+  GPU_Vector<int> i(N_domains);
+  GPU_Vector<int> type_i(N_domains);
+  GPU_Vector<int> type_j(N_domains);
+  GPU_Vector<int> index_new_species(N_domains);
+  GPU_Vector<int> index_old_species(N_domains);
+
+  for (int step = 0; step < num_steps_mc; ++step) {
     NN_ij.fill(0);
     pe_nep_before_local.fill(0.0f);
     NN_angular_i.fill(0);
     nep_energy_fast.nep_data.q_radial_local.fill(0.0f);
     nep_energy_fast.nep_data.s_angular_local.fill(0.0f);
-    nep_energy_fast.nep_data.q_radial_i.fill(0.0f);
-    nep_energy_fast.nep_data.s_angular_i.fill(0.0f);
     is_neigh_angular.fill(false);
     t2_radial.fill(0);
     x12_radial.fill(0.0f);
@@ -411,21 +455,21 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
     int subdomain_color = color(rng);
 
-    std::vector<int> i_cpu(N_domains, -1);
-    std::vector<int> type_i_cpu(N_domains, -1);
-    std::vector<int> type_j_cpu(N_domains);
-    std::vector<int> index_new_species_cpu(N_domains);
-    std::vector<int> index_old_species_cpu(N_domains);
-
     for (int domain = 0; domain < N_domains; ++domain){
+      if (domain_is_empty[domain]) {continue;}
       int subdomain = subdomains[subdomain_color][domain];
       std::string species_found;
       while (!allowed_species(species_found)) {
         int local_ind = r1[subdomain](rng);
-        int global_ind = nep_energy_fast.nep_data.subdomain_contents[local_ind];
-        i_cpu[domain] = grouping_method >= 0
+        int global_ind = subdomain_contents_cpu[subdomain_count_sum_cpu[subdomain] + local_ind];
+        /*i_cpu[domain] = grouping_method >= 0
               ? groups[grouping_method].cpu_contents[groups[grouping_method].cpu_size_sum[group_id] + global_ind]
               : global_ind;
+         */ //TODO сделать проход в find_subdomains_list только по группе
+        i_cpu[domain] = global_ind;
+        if (grouping_method >= 0){
+          printf("[ERROR]: grouping unsuported in MCMD parallel now! Groups will be ignored");
+        }
         species_found = atom.cpu_atom_symbol[i_cpu[domain]];
         type_i_cpu[domain] = atom.cpu_type[i_cpu[domain]];
       }
@@ -436,12 +480,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
         type_j_cpu[domain] = types[index_new_species_cpu[domain]];
       }
     }
-
-    GPU_Vector<int> i(N_domains);
-    GPU_Vector<int> type_i(N_domains);
-    GPU_Vector<int> type_j(N_domains);
-    GPU_Vector<int> index_new_species(N_domains);
-    GPU_Vector<int> index_old_species(N_domains);
 
     i.copy_from_host(i_cpu.data());
     type_i.copy_from_host(type_i_cpu.data());
@@ -468,16 +506,19 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
 
     std::vector<int> NN_ij_cpu(N_domains);
-    NN_ij.copy_to_host(NN_ij_cpu.data());
+    NN_ij.copy_to_host(NN_ij_cpu.data(), N_domains);
+
+    int n_max_actual = *std::max_element(NN_ij_cpu.begin(), NN_ij_cpu.end());
 
     for (int domain = 0; domain < N_domains; domain++){// TODO может быть стоит завести один массив для энергий центральных атомов или изменить его структуру - писать все в последнюю строчку (так же быстрее копирование?)
-      CHECK(gpuMemcpy(&pe_nep_before_local.data()[NN_ij_cpu[domain]], &nep_energy_fast.nep_data.pe_nep.data()[i[domain]], sizeof(float), gpuMemcpyDeviceToDevice)); 
+      if (domain_is_empty[domain]) {continue;}
+      CHECK(gpuMemcpy(pe_nep_before_local.data() + NN_ij_cpu[domain]*N_domains + domain, &nep_energy_fast.nep_data.pe_nep.data()[i[domain]], sizeof(float), gpuMemcpyDeviceToDevice)); 
     }
     
 
-    create_inputs_for_energy_calculator_fastNEP<<<(n_max*N_domains - 1) / 64 + 1, 64>>>(
+    create_inputs_for_energy_calculator_fastNEP<<<((n_max_actual + 1) * N_domains - 1) / 64 + 1, 64>>>(
       nep_energy_fast.paramb,
-      NN_ij_cpu.data(),
+      NN_ij.data(),
       N_domains,
       i.data(),
       NL_ij.data(),
@@ -500,12 +541,12 @@ void MC_Ensemble_SGC_fastNEP::compute(
       nep_energy_fast.nep_data.s_angular_local.data());
     GPU_CHECK_KERNEL
   
-    //int N = std::accumulate(NN_ij_cpu.begin(), NN_ij_cpu.end(), 0);
-    const int N = n_max*N_domains;
+    
+    const int N = (n_max_actual + 1) * N_domains;
 
     nep_energy_fast.find_energy( // calculate energy differences for neighbors of th central (i) atom after MC trial swap: delta_pe_nep, delta_pe_zbl
       N_domains,
-      NN_ij_cpu.data(),
+      NN_ij.data(),
       N,
       i.data(),
       NN_angular_i.data(),
@@ -529,8 +570,9 @@ void MC_Ensemble_SGC_fastNEP::compute(
     delta_pe_zbl.copy_to_host(delta_pe_zbl_cpu.data(), N);
 
     std::vector<float> energy_difference(N_domains, 0.0f);
-    for (int domain = 0; domain < N_domains; ++N_domains) {
-      for (int n = 0; n < NN_ij_cpu[domain]; ++n){
+    for (int domain = 0; domain < N_domains; ++domain) {
+      if (domain_is_empty[domain]) {continue;}
+      for (int n = 0; n <= NN_ij_cpu[domain]; ++n){
         energy_difference[domain] += delta_pe_nep_cpu[n*N_domains + domain];
         energy_difference[domain] += delta_pe_zbl_cpu[n*N_domains + domain];
       }
@@ -538,7 +580,14 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
 
     #ifdef FAST_NEP_MC_TEST
-      mc_debug_log << i << "; " << type_i << "; " << type_j << "; " << energy_difference  << std::endl;
+      for (int domain = 0; domain < N_domains; ++domain){
+        if (domain_is_empty[domain]) {
+          mc_debug_log << domain "; empty" << std::endl;
+        }
+        else {
+          mc_debug_log << domain "; " << i_cpu[domain] << "; " << type_i_cpu[domain] << "; " << type_j_cpu[domain] << "; " << energy_difference[domain]  << std::endl;
+        }
+      }
     #endif
 
     std::uniform_real_distribution<float> r2(0, 1);
@@ -546,6 +595,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     bool global_acceptance = true;
 
     for (int domain = 0; domain < N_domains; ++domain){
+      if (domain_is_empty[domain]){is_accepted[domain] = false; continue;}
       energy_difference[domain] += mu_or_phi[index_new_species[domain]] - mu_or_phi[index_old_species[domain]];
       if (is_vcsgc){ // TODO: кажется здесь ерунда щас написана
         energy_difference[domain] += 2*kappa*num_atoms*(target_concentration[index_new_species[domain]]-target_concentration[index_old_species[domain]]);
@@ -568,6 +618,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     if (is_vcsgc) {
       float exponent = 0.0f;
       for (int domain = 0; domain < N_domains; ++domain){
+        if (domain_is_empty[domain]){continue;}
         exponent += kappa*num_atoms * (num_atoms_species[index_new_species[domain]]+1.0-target_concentration[index_new_species[domain]]); // TODO посчитать что там должно быть
         exponent += kappa*num_atoms * (num_atoms_species[index_old_species[domain]]-1.0-target_concentration[index_old_species[domain]]); // TODO посчитать что там должно быть
       }
@@ -578,16 +629,17 @@ void MC_Ensemble_SGC_fastNEP::compute(
     
     if (global_acceptance) {
       for (int domain = 0; domain < N_domains; ++domain){
+        if (domain_is_empty[domain]){continue;}
         if (is_accepted[domain]){
           ++num_accepted;
-          ++num_atoms_species[index_new_species[domain]];
-          --num_atoms_species[index_old_species[domain]];
+          ++num_atoms_species[index_new_species_cpu[domain]];
+          --num_atoms_species[index_old_species_cpu[domain]];
 
-          atom.cpu_type[i[domain]] = type_j[domain];
-          atom.cpu_atom_symbol[i[domain]] = species[index_new_species[domain]];
-          double mass_old = atom.cpu_mass[i[domain]];
-          double mass_new = MASS_TABLE.at(species[index_new_species[domain]]);
-          atom.cpu_mass[i[domain]] = mass_new;
+          atom.cpu_type[i_cpu[domain]] = type_j_cpu[domain];
+          atom.cpu_atom_symbol[i_cpu[domain]] = species[index_new_species_cpu[domain]];
+          double mass_old = atom.cpu_mass[i_cpu[domain]];
+          double mass_new = MASS_TABLE.at(species[index_new_species_cpu[domain]]);
+          atom.cpu_mass[i_cpu[domain]] = mass_new;
 
           gpu_flip<<<1, 1>>>(
             i[domain],

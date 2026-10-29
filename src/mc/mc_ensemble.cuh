@@ -41,8 +41,8 @@ public:
     int grouping_method,
     int group_id) = 0;
 
-  const int n_max = 1000; // size of arrays with radial neighbors quantities
-  const int m_max = 1000; // size of arrays with angular neighbors quantities
+  const int n_max = 200; // size of arrays with radial neighbors quantities
+  const int m_max = 200; // size of arrays with angular neighbors quantities
 
 protected:
   int num_steps_mc = 0;

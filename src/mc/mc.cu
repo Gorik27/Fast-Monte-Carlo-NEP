@@ -412,7 +412,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     if (!is_valid_int(param[10 + num_types_mc * 3], &Nz_domains)) {
       PRINT_INPUT_ERROR("number of domains should be an integer.\n");
     }
-    if (Nx_domains < 0 || Ny_domains < 0 || Nz_domains < 0) {
+    if (Nx_domains <= 0 || Ny_domains <= 0 || Nz_domains <= 0) {
       PRINT_INPUT_ERROR("number of domains should be positive.\n");
     }
     printf("    number of domains = (%d, %d, %d)\n", Nx_domains, Ny_domains, Nz_domains);

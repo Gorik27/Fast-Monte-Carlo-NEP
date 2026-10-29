@@ -124,25 +124,7 @@ MC_Ensemble::MC_Ensemble(const char** param, int num_param, const int num_atoms,
     mc_debug_log << "# log for debugging" << std::endl;
   #endif
 
-  //const int n_max = 1000;
-  //const int m_max = 1000;
   int N_domains = Nx_domains * Ny_domains * Nz_domains;
-  NN_radial.resize(n_max * N_domains);
-  NN_angular.resize(n_max * N_domains);
-  local_type_before.resize(n_max * N_domains);
-  local_type_after.resize(n_max * N_domains);
-  t2_radial_before.resize(n_max * m_max * N_domains);
-  t2_radial_after.resize(n_max * m_max * N_domains);
-  t2_angular_before.resize(n_max * m_max * N_domains);
-  t2_angular_after.resize(n_max * m_max * N_domains);
-  x12_radial.resize(n_max * m_max * N_domains);
-  y12_radial.resize(n_max * m_max * N_domains);
-  z12_radial.resize(n_max * m_max * N_domains);
-  x12_angular.resize(n_max * m_max * N_domains);
-  y12_angular.resize(n_max * m_max * N_domains);
-  z12_angular.resize(n_max * m_max * N_domains);
-  pe_before.resize(n_max * N_domains);
-  pe_after.resize(n_max * N_domains);
 
   std::string potential_file_name = get_potential_file_name();
   check_is_nep(potential_file_name);
