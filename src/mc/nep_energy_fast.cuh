@@ -42,8 +42,6 @@ struct NEP_Fast_Data {
   int q_radial_local_size;
   GPU_Vector<float> s_angular_trial_local;
   int s_angular_local_size;
-  std::vector<int> cpu_NN_radial;
-  std::vector<int> cpu_NN_angular;
   GPU_Vector<float> pe_nep;
   GPU_Vector<int> num_domains;
   GPU_Vector<double> subdomain_inv_size;

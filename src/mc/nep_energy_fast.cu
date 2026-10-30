@@ -284,8 +284,6 @@ void NEP_Energy_fast::initialize(
   nep_data.cell_count.resize(num_atoms);
   nep_data.cell_count_sum.resize(num_atoms);
   nep_data.cell_contents.resize(num_atoms);
-  nep_data.cpu_NN_radial.resize(num_atoms);
-  nep_data.cpu_NN_angular.resize(num_atoms);
   nep_data.q_radial.resize(num_atoms * (paramb.n_max_radial + 1) ); // radial descriptors
   nep_data.s_angular.resize(num_atoms * (paramb.n_max_angular + 1) * NUM_OF_ABC); // angular descriptors (S values)
   nep_data.q_radial_local_size = n_max * (paramb.n_max_radial + 1) * N_domains; 

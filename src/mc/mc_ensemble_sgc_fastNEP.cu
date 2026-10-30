@@ -245,6 +245,44 @@ static __global__ void get_neighbors_of_i_fastNEP(
   }
 }
 
+static __global__ void load_neighbors_of_i_fastNEP(
+  const int n_max,
+  const int N,
+  const int N_domains,
+  const int* __restrict__  g_i,
+  const int* __restrict__  g_NN,
+  const int* __restrict__  g_NL,
+  const float*  __restrict__ g_pe_nep_before,
+  int* g_NN_local,
+  int* g_NL_local,
+  float* g_pe_nep_before_local)
+{
+  int thread = blockIdx.x * blockDim.x + threadIdx.x;
+  int n = thread / N_domains;
+  if (n < n_max) {
+    int domain = thread % N_domains;
+    int i = g_i[domain];
+    if (i < 0){
+      return;
+    }
+    int NN = g_NN[i];
+    if (n == 0){
+      g_NN_local[domain] = NN;
+    }
+    if (n < NN){
+      int index_global = g_NL[n * N + i];
+      g_NL_local[thread] = index_global;
+      g_pe_nep_before_local[thread] = g_pe_nep_before[index_global];
+    }
+    else if (n == NN){
+      g_pe_nep_before_local[thread] = g_pe_nep_before[i];
+    }
+    else {
+      g_pe_nep_before_local[thread] = 0.0f;
+    }
+  }
+}
+
 static __global__ void create_inputs_for_energy_calculator_fastNEP(
   NEP_Energy_fast::ParaMB paramb,
   const int* N_local,
@@ -283,34 +321,33 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
     double z12 = z2 - g_z[i[domain]];
     apply_mic(box, x12, y12, z12);
     float distance_square = float(x12 * x12 + y12 * y12 + z12 * z12);
-    if (distance_square < rc_radial_square) {
-      g_t2_radial[thread] = g_type[n1];
-      g_x12_radial[thread] = float(x12);
-      g_y12_radial[thread] = float(y12);
-      g_z12_radial[thread] = float(z12);
-      
-      for (int n = 0; n <= paramb.n_max_radial; ++n){
+    g_t2_radial[thread] = g_type[n1];
+    g_x12_radial[thread] = float(x12);
+    g_y12_radial[thread] = float(y12);
+    g_z12_radial[thread] = float(z12);
+    
+    for (int n = 0; n <= paramb.n_max_radial; ++n){
+      int index, index_local;
+      index_local = (k*(paramb.n_max_radial+1) + n)*N_domains + domain;
+      index = n1*(paramb.n_max_radial+1) + n;
+      g_q_radial_local[index_local] = g_q_radial[index];
+    }
+    
+    for (int n = 0; n <= paramb.n_max_angular; ++n){
+      for (int l = 0; l<NUM_OF_ABC; ++l){
         int index, index_local;
-        index_local = (k*(paramb.n_max_radial+1) + n)*N_domains + domain;
-        index = n1*(paramb.n_max_radial+1) + n;
-        g_q_radial_local[index_local] = g_q_radial[index];
-      }
-      
-      for (int n = 0; n <= paramb.n_max_angular; ++n){
-        for (int l = 0; l<NUM_OF_ABC; ++l){
-          int index, index_local;
-          index_local = (k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
-          index =      n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
-          g_s_angular_local[index_local] = g_s_angular[index];
-        }
-      }
-      if (distance_square < rc_angular_square) {
-        g_is_neigh_angular[thread] = true;
-      }
-      else {
-        g_is_neigh_angular[thread] = false;
+        index_local = (k*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l) * N_domains + domain;
+        index =      n1*(paramb.n_max_angular+1)*NUM_OF_ABC + n*NUM_OF_ABC + l;
+        g_s_angular_local[index_local] = g_s_angular[index];
       }
     }
+    if (distance_square < rc_angular_square) {
+      g_is_neigh_angular[thread] = true;
+    }
+    else {
+      g_is_neigh_angular[thread] = false;
+    }
+    
   }
   else if (k == N_local[domain]){// central (i) atom
     for (int n = 0; n <= paramb.n_max_radial; ++n){
@@ -334,8 +371,8 @@ static __global__ void create_inputs_for_energy_calculator_fastNEP(
 
 // a kernel with a single thread <<<1, 1>>>
 static __global__ void gpu_flip(
-  const int& i,
-  const int& type_j,
+  const int i,
+  const int type_j,
   const double mass_j,
   const double mass_scaler,
   int* g_type,
@@ -507,19 +544,16 @@ void MC_Ensemble_SGC_fastNEP::compute(
     index_old_species.copy_from_host(index_old_species_cpu.data());
 
 
-    get_neighbors_of_i_fastNEP<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(// TODO: переписать на быстрый вариант с cells
+    load_neighbors_of_i_fastNEP<<<(n_max * N_domains - 1) / 64 + 1, 64>>>(// TODO: переписать на быстрый вариант с cells
       n_max,
-      atom.number_of_atoms,
-      box,
-      i.data(),
+      num_atoms,
       N_domains,
-      nep_energy_fast.paramb.rc_radial * nep_energy_fast.paramb.rc_radial,
-      atom.position_per_atom.data(),
-      atom.position_per_atom.data() + atom.number_of_atoms,
-      atom.position_per_atom.data() + atom.number_of_atoms * 2,
+      i.data(),
+      nep_energy_fast.nep_data.NN_radial.data(),
+      nep_energy_fast.nep_data.NL_radial.data(),
+      nep_energy_fast.nep_data.pe_nep.data(),
       NN_ij.data(),
       NL_ij.data(),
-      nep_energy_fast.nep_data.pe_nep.data(),
       pe_nep_before_local.data());
     GPU_CHECK_KERNEL
 
@@ -535,11 +569,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
       exit(1);
     }
 
-    for (int domain = 0; domain < N_domains; domain++){// TODO может быть стоит завести один массив для энергий центральных атомов или изменить его структуру - писать все в последнюю строчку (так же быстрее копирование?)
-      if (subdomain_is_empty[subdomains[subdomain_color][domain]]) {continue;}
-      CHECK(gpuMemcpy(pe_nep_before_local.data() + NN_ij_cpu[domain]*N_domains + domain, &nep_energy_fast.nep_data.pe_nep.data()[i_cpu[domain]], sizeof(float), gpuMemcpyDeviceToDevice)); 
-    }
-    
 
     create_inputs_for_energy_calculator_fastNEP<<<((n_max_actual + 1) * N_domains - 1) / 64 + 1, 64>>>(
       nep_energy_fast.paramb,
