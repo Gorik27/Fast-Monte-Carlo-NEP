@@ -23,6 +23,7 @@ CFLAGS = -O3 $(CUDA_ARCH)
 else # For linux
 CFLAGS = -std=c++17 -ccbin /usr/bin/gcc-11 -O3 $(CUDA_ARCH) #-DDEBUG -DFAST_NEP_MC_TEST #  -g -G 
 endif
+CFLAGS_TEST = $(CFLAGS) -DMC_TEST # flags of the testmc executable (MC test, see mc/mc.cu)
 INC = -I./
 LDFLAGS = 
 LIBS = -lcublas -lcusolver -lcufft
@@ -56,10 +57,12 @@ ifdef OS # For Windows with the cl.exe compiler
 OBJ_GPUMD = $(SOURCES_GPUMD:.cu=.obj)
 OBJ_NEP = $(SOURCES_NEP:.cu=.obj)
 OBJ_GNEP = $(SOURCES_GNEP:.cu=.obj)
+OBJ_TEST = $(SOURCES_GPUMD:.cu=.mctest.obj)
 else
 OBJ_GPUMD = $(SOURCES_GPUMD:.cu=.o)
 OBJ_NEP = $(SOURCES_NEP:.cu=.o)
 OBJ_GNEP = $(SOURCES_GNEP:.cu=.o)
+OBJ_TEST = $(SOURCES_GPUMD:.cu=.mctest.o)
 endif
 
 
@@ -94,6 +97,11 @@ gpumd: $(OBJ_GPUMD)
 	@echo =================================================
 	@echo The gpumd executable is successfully compiled!
 	@echo =================================================
+testmc: $(OBJ_TEST)
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+	@echo =================================================
+	@echo The testmc executable is successfully compiled!
+	@echo =================================================
 nep: $(OBJ_NEP)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 	@echo =================================================
@@ -110,6 +118,8 @@ gnep: $(OBJ_GNEP)
 # rules for building object files
 ###########################################################
 ifdef OS # for Windows
+%.mctest.obj: %.cu $(HEADERS)
+	$(CC) $(CFLAGS_TEST) $(INC) -c $< -o $@
 integrate/%.obj: integrate/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 mc/%.obj: mc/%.cu $(HEADERS)
@@ -133,6 +143,8 @@ main_nep/%.obj: main_nep/%.cu $(HEADERS)
 main_gnep/%.obj: main_gnep/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 else # for Linux
+%.mctest.o: %.cu $(HEADERS)
+	$(CC) $(CFLAGS_TEST) $(INC) -c $< -o $@
 integrate/%.o: integrate/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 mc/%.o: mc/%.cu $(HEADERS)
@@ -165,6 +177,6 @@ clean:
 ifdef OS
 	del /s *.obj *.exp *.lib *.exe
 else
-	rm -f */*.o gpumd nep gnep gpumd_parallel
+	rm -f */*.o gpumd nep gnep gpumd_parallel testmc
 endif
 
