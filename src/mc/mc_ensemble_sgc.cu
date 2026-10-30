@@ -30,6 +30,8 @@ integration across phase boundaries, Phys. Rev. B 86, 134204 (2012).
 #include "utilities/gpu_macro.cuh"
 #include <map>
 #include <cstring>
+#include <cmath>
+#include <algorithm>
 
 const std::map<std::string, double> MASS_TABLE{
   {"H", 1.0080000000},
@@ -317,6 +319,116 @@ bool MC_Ensemble_SGC::allowed_species(std::string& species_found)
   return false;
 }
 
+// Energy change (NEP) caused by changing the type of atom i to type_j, computed from scratch
+float MC_Ensemble_SGC::find_energy_difference(const int i, const int type_j, Atom& atom, Box& box)
+{
+  if (type_before.size() < atom.number_of_atoms) {
+    type_before.resize(atom.number_of_atoms);
+    type_after.resize(atom.number_of_atoms);
+  }
+
+  CHECK(gpuMemset(NN_ij.data(), 0, sizeof(int)));
+  get_neighbors_of_i<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
+    atom.number_of_atoms,
+    box,
+    i,
+    nep_energy.paramb.rc_radial * nep_energy.paramb.rc_radial,
+    atom.position_per_atom.data(),
+    atom.position_per_atom.data() + atom.number_of_atoms,
+    atom.position_per_atom.data() + atom.number_of_atoms * 2,
+    NN_ij.data(),
+    NL_ij.data());
+  GPU_CHECK_KERNEL
+
+  int NN_ij_cpu;
+  NN_ij.copy_to_host(&NN_ij_cpu);
+
+  get_types<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
+    atom.number_of_atoms, i, type_j, atom.type.data(), type_before.data(), type_after.data());
+  GPU_CHECK_KERNEL
+
+  find_local_types<<<(NN_ij_cpu - 1) / 64 + 1, 64>>>(
+    NN_ij_cpu,
+    NL_ij.data(),
+    type_before.data(),
+    type_after.data(),
+    local_type_before.data(),
+    local_type_after.data());
+  GPU_CHECK_KERNEL
+
+  CHECK(gpuMemset(NN_radial.data(), 0, sizeof(int) * NN_radial.size()));
+  CHECK(gpuMemset(NN_angular.data(), 0, sizeof(int) * NN_angular.size()));
+  create_inputs_for_energy_calculator<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
+    atom.number_of_atoms,
+    NN_ij_cpu,
+    NL_ij.data(),
+    box,
+    nep_energy.paramb.rc_radial * nep_energy.paramb.rc_radial,
+    nep_energy.paramb.rc_angular * nep_energy.paramb.rc_angular,
+    atom.position_per_atom.data(),
+    atom.position_per_atom.data() + atom.number_of_atoms,
+    atom.position_per_atom.data() + atom.number_of_atoms * 2,
+    type_before.data(),
+    type_after.data(),
+    NN_radial.data(),
+    NN_angular.data(),
+    t2_radial_before.data(),
+    t2_radial_after.data(),
+    t2_angular_before.data(),
+    t2_angular_after.data(),
+    x12_radial.data(),
+    y12_radial.data(),
+    z12_radial.data(),
+    x12_angular.data(),
+    y12_angular.data(),
+    z12_angular.data());
+  GPU_CHECK_KERNEL
+
+  nep_energy.find_energy(
+    NN_ij_cpu,
+    NN_radial.data(),
+    NN_angular.data(),
+    local_type_before.data(),
+    t2_radial_before.data(),
+    t2_angular_before.data(),
+    x12_radial.data(),
+    y12_radial.data(),
+    z12_radial.data(),
+    x12_angular.data(),
+    y12_angular.data(),
+    z12_angular.data(),
+    pe_before.data());
+
+  nep_energy.find_energy(
+    NN_ij_cpu,
+    NN_radial.data(),
+    NN_angular.data(),
+    local_type_after.data(),
+    t2_radial_after.data(),
+    t2_angular_after.data(),
+    x12_radial.data(),
+    y12_radial.data(),
+    z12_radial.data(),
+    x12_angular.data(),
+    y12_angular.data(),
+    z12_angular.data(),
+    pe_after.data());
+
+  std::vector<float> pe_before_cpu(NN_ij_cpu);
+  std::vector<float> pe_after_cpu(NN_ij_cpu);
+  pe_before.copy_to_host(pe_before_cpu.data(), NN_ij_cpu);
+  pe_after.copy_to_host(pe_after_cpu.data(), NN_ij_cpu);
+  float pe_before_total = 0.0f;
+  float pe_after_total = 0.0f;
+  for (int n = 0; n < NN_ij_cpu; ++n) {
+    pe_before_total += pe_before_cpu[n];
+    pe_after_total += pe_after_cpu[n];
+  }
+  // printf("        per-atom energy before swapping = %g eV.\n", pe_before_total / NN_ij_cpu);
+  // printf("        per-atom energy after swapping = %g eV.\n", pe_after_total / NN_ij_cpu);
+  return pe_after_total - pe_before_total;
+}
+
 void MC_Ensemble_SGC::compute(
   int md_step,
   double temperature,
@@ -366,106 +478,7 @@ void MC_Ensemble_SGC::compute(
       type_j = types[index_new_species];
     }
 
-    CHECK(gpuMemset(NN_ij.data(), 0, sizeof(int)));
-    get_neighbors_of_i<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
-      atom.number_of_atoms,
-      box,
-      i,
-      nep_energy.paramb.rc_radial * nep_energy.paramb.rc_radial,
-      atom.position_per_atom.data(),
-      atom.position_per_atom.data() + atom.number_of_atoms,
-      atom.position_per_atom.data() + atom.number_of_atoms * 2,
-      NN_ij.data(),
-      NL_ij.data());
-    GPU_CHECK_KERNEL
-
-    int NN_ij_cpu;
-    NN_ij.copy_to_host(&NN_ij_cpu);
-
-    get_types<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
-      atom.number_of_atoms, i, type_j, atom.type.data(), type_before.data(), type_after.data());
-    GPU_CHECK_KERNEL
-
-    find_local_types<<<(NN_ij_cpu - 1) / 64 + 1, 64>>>(
-      NN_ij_cpu,
-      NL_ij.data(),
-      type_before.data(),
-      type_after.data(),
-      local_type_before.data(),
-      local_type_after.data());
-    GPU_CHECK_KERNEL
-
-    CHECK(gpuMemset(NN_radial.data(), 0, sizeof(int) * NN_radial.size()));
-    CHECK(gpuMemset(NN_angular.data(), 0, sizeof(int) * NN_angular.size()));
-    create_inputs_for_energy_calculator<<<(atom.number_of_atoms - 1) / 64 + 1, 64>>>(
-      atom.number_of_atoms,
-      NN_ij_cpu,
-      NL_ij.data(),
-      box,
-      nep_energy.paramb.rc_radial * nep_energy.paramb.rc_radial,
-      nep_energy.paramb.rc_angular * nep_energy.paramb.rc_angular,
-      atom.position_per_atom.data(),
-      atom.position_per_atom.data() + atom.number_of_atoms,
-      atom.position_per_atom.data() + atom.number_of_atoms * 2,
-      type_before.data(),
-      type_after.data(),
-      NN_radial.data(),
-      NN_angular.data(),
-      t2_radial_before.data(),
-      t2_radial_after.data(),
-      t2_angular_before.data(),
-      t2_angular_after.data(),
-      x12_radial.data(),
-      y12_radial.data(),
-      z12_radial.data(),
-      x12_angular.data(),
-      y12_angular.data(),
-      z12_angular.data());
-    GPU_CHECK_KERNEL
-
-    nep_energy.find_energy(
-      NN_ij_cpu,
-      NN_radial.data(),
-      NN_angular.data(),
-      local_type_before.data(),
-      t2_radial_before.data(),
-      t2_angular_before.data(),
-      x12_radial.data(),
-      y12_radial.data(),
-      z12_radial.data(),
-      x12_angular.data(),
-      y12_angular.data(),
-      z12_angular.data(),
-      pe_before.data());
-
-    nep_energy.find_energy(
-      NN_ij_cpu,
-      NN_radial.data(),
-      NN_angular.data(),
-      local_type_after.data(),
-      t2_radial_after.data(),
-      t2_angular_after.data(),
-      x12_radial.data(),
-      y12_radial.data(),
-      z12_radial.data(),
-      x12_angular.data(),
-      y12_angular.data(),
-      z12_angular.data(),
-      pe_after.data());
-
-    std::vector<float> pe_before_cpu(NN_ij_cpu);
-    std::vector<float> pe_after_cpu(NN_ij_cpu);
-    pe_before.copy_to_host(pe_before_cpu.data(), NN_ij_cpu);
-    pe_after.copy_to_host(pe_after_cpu.data(), NN_ij_cpu);
-    float pe_before_total = 0.0f;
-    float pe_after_total = 0.0f;
-    for (int n = 0; n < NN_ij_cpu; ++n) {
-      pe_before_total += pe_before_cpu[n];
-      pe_after_total += pe_after_cpu[n];
-    }
-    // printf("        per-atom energy before swapping = %g eV.\n", pe_before_total / NN_ij_cpu);
-    // printf("        per-atom energy after swapping = %g eV.\n", pe_after_total / NN_ij_cpu);
-    float energy_difference = pe_after_total - pe_before_total;
+    float energy_difference = find_energy_difference(i, type_j, atom, box);
 
     #ifdef FAST_NEP_MC_TEST
       mc_debug_log << i << "; " << type_i << "; " << type_j << "; " << energy_difference  << std::endl;
@@ -518,3 +531,74 @@ void MC_Ensemble_SGC::compute(
   }
   mc_output << std::endl;
 }
+
+#ifdef MC_TEST
+MC_TestReport MC_Ensemble_SGC::replay_steps(
+  const std::vector<MC_TestStep>& steps, Atom& atom, Box& box, double atol, double rtol)
+{
+  MC_TestReport report;
+  const int max_printed = 20; // do not flood the output
+  int num_printed = 0;
+  const int num_trials = steps.empty() ? 1 : steps.back().trial + 1;
+
+  for (const auto& s : steps) {
+    ++report.num_steps;
+
+    // 1. the system must be in the same state as it was in the parallel run before this step
+    if (atom.cpu_type[s.i] != s.type_i || atom.cpu_atom_symbol[s.i] != species[s.index_old_species]) {
+      ++report.num_type_fail;
+      if (num_printed++ < max_printed) {
+        printf(
+          "[MC_TEST] type mismatch: md_step %d trial %d domain %d atom %d: logged type_i = %d, "
+          "current type = %d\n",
+          s.md_step, s.trial, s.domain, s.i, s.type_i, atom.cpu_type[s.i]);
+      }
+      continue; // the state is inconsistent, the energy comparison would be meaningless
+    }
+
+    // 2. energy change of the trial swap, recomputed with the original implementation
+    const double dE_ref = find_energy_difference(s.i, s.type_j, atom, box);
+    const double abs_err = std::fabs(dE_ref - s.dE_potential);
+    const double rel_err = abs_err / std::max(std::fabs(dE_ref), 1.0e-6);
+    report.max_abs_err = std::max(report.max_abs_err, abs_err);
+    const int bin = std::min(4, s.trial * 5 / num_trials);
+    report.max_abs_err_bin[bin] = std::max(report.max_abs_err_bin[bin], abs_err);
+    report.max_rel_err = std::max(report.max_rel_err, rel_err);
+    if (abs_err > atol + rtol * std::fabs(dE_ref)) {
+      ++report.num_energy_fail;
+      if (num_printed++ < max_printed) {
+        printf(
+          "[MC_TEST] energy mismatch: md_step %d trial %d domain %d atom %d (%d -> %d): "
+          "parallel dE = %.6f eV, original dE = %.6f eV, |diff| = %.3e eV\n",
+          s.md_step, s.trial, s.domain, s.i, s.type_i, s.type_j, s.dE_potential, dE_ref, abs_err);
+      }
+    }
+
+    // 3. apply the swap if it was applied in the parallel run
+    if (s.applied) {
+      ++report.num_applied;
+      ++num_atoms_species[s.index_new_species];
+      --num_atoms_species[s.index_old_species];
+
+      atom.cpu_type[s.i] = s.type_j;
+      atom.cpu_atom_symbol[s.i] = species[s.index_new_species];
+      const double mass_old = atom.cpu_mass[s.i];
+      const double mass_new = MASS_TABLE.at(species[s.index_new_species]);
+      atom.cpu_mass[s.i] = mass_new;
+
+      gpu_flip<<<1, 1>>>(
+        s.i,
+        s.type_j,
+        mass_new,
+        mass_old / mass_new,
+        atom.type.data(),
+        atom.mass.data(),
+        atom.velocity_per_atom.data(),
+        atom.velocity_per_atom.data() + atom.number_of_atoms,
+        atom.velocity_per_atom.data() + atom.number_of_atoms * 2);
+      GPU_CHECK_KERNEL
+    }
+  }
+  return report;
+}
+#endif

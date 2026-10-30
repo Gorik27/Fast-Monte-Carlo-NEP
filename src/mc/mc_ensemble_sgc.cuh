@@ -40,7 +40,18 @@ public:
     int grouping_method,
     int group_id);
 
+#ifdef MC_TEST
+  virtual std::vector<int> test_num_atoms_species() const { return num_atoms_species; }
+  // Repeat the steps logged by the parallel implementation. The energy change of every step is
+  // recomputed from scratch and compared with the logged one; swaps flagged as applied are
+  // applied to the system.
+  MC_TestReport replay_steps(
+    const std::vector<MC_TestStep>& steps, Atom& atom, Box& box, double atol, double rtol);
+#endif
+
 private:
+  float find_energy_difference(const int i, const int type_j, Atom& atom, Box& box);
+
   GPU_Vector<int> NN_ij;
   GPU_Vector<int> NL_ij;
   bool is_vcsgc = false;
