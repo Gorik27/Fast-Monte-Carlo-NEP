@@ -422,11 +422,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
   int num_trials = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
   num_trials = ((num_trials - 1) / N_domains + 1);
 
-  #ifdef FAST_NEP_MC_TEST
-    mc_debug_log << "# VCSGC fastNEP; number of micro MC steps: " << num_trials << std::endl;
-    mc_debug_log << "# domain; i; type_i; type_j; energy_difference" << std::endl;
-  #endif
-
   std::uniform_int_distribution<int> color(0, 7);
 
   std::uniform_int_distribution<int> rand_int2(0, types.size() - 1);
@@ -598,17 +593,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
       const std::vector<float> dE_potential_cpu = energy_difference;
     #endif
 
-    #ifdef FAST_NEP_MC_TEST
-      for (int domain = 0; domain < N_domains; ++domain){
-        if (subdomain_is_empty[subdomains[subdomain_color][domain]]) {
-          mc_debug_log << domain << "; empty" << std::endl;
-        }
-        else {
-          mc_debug_log << domain << "; " << i_cpu[domain] << "; " << type_i_cpu[domain] << "; " << type_j_cpu[domain] << "; " << energy_difference[domain]  << std::endl;
-        }
-      }
-    #endif
-
     std::uniform_real_distribution<float> r2(0, 1);
     std::vector<bool> is_accepted(N_domains);
     bool global_acceptance = true;
@@ -622,9 +606,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
       float random_number = r2(rng);
       float probability = exp(-energy_difference[domain] / (K_B * temperature));
-      #ifdef FAST_NEP_MC_TEST
-        probability = 0.5;
-      #endif
       if (!(random_number < probability)) {
         is_accepted[domain] = false;
         energy_difference[domain] = 0.0f;
