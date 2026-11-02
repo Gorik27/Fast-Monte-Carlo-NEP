@@ -597,12 +597,11 @@ void MC_Ensemble_SGC_fastNEP::compute(
     std::vector<bool> is_accepted(N_domains);
     bool global_acceptance = true;
 
+    std::vector<int> deltaN_tot(species.size(), 0);
+
     for (int domain = 0; domain < N_domains; ++domain){
       if (subdomain_is_empty[subdomains[subdomain_color][domain]]){is_accepted[domain] = false; continue;}
       energy_difference[domain] += mu_or_phi[index_new_species_cpu[domain]] - mu_or_phi[index_old_species_cpu[domain]];
-      if (is_vcsgc){ // TODO: кажется здесь ерунда щас написана
-        energy_difference[domain] += 2*kappa*num_atoms*(target_concentration[index_new_species_cpu[domain]]-target_concentration[index_old_species_cpu[domain]]);
-      }
 
       float random_number = r2(rng);
       float probability = exp(-energy_difference[domain] / (K_B * temperature));
@@ -612,16 +611,21 @@ void MC_Ensemble_SGC_fastNEP::compute(
       }
       else {
         is_accepted[domain] = true;
+        if (is_vcsgc){
+          deltaN_tot[index_new_species_cpu[domain]]++;
+          deltaN_tot[index_old_species_cpu[domain]]--;
+        }
       }
     }
 
     if (is_vcsgc) {
-      float exponent = 0.0f;
-      for (int domain = 0; domain < N_domains; ++domain){
-        if (subdomain_is_empty[subdomains[subdomain_color][domain]]){continue;}
-        exponent += kappa*num_atoms * (num_atoms_species[index_new_species_cpu[domain]]+1.0-target_concentration[index_new_species_cpu[domain]]); // TODO посчитать что там должно быть
-        exponent += kappa*num_atoms * (num_atoms_species[index_old_species_cpu[domain]]-1.0-target_concentration[index_old_species_cpu[domain]]); // TODO посчитать что там должно быть
-      }
+      double A = 0.0;
+        for (int k = 0; k < species.size(); ++k) {
+          int dN  = deltaN_tot[k];
+          A += (double) (dN * dN + 2.0 * dN * (num_atoms_species[k] - (int)(target_concentration[k] * num_atoms)));
+        }
+      float exponent = - (kappa / num_atoms) * A;
+      
       float random_number = r2(rng);
       float probability = exp(-exponent / (K_B * temperature));
       global_acceptance = (random_number < probability);
@@ -661,8 +665,8 @@ void MC_Ensemble_SGC_fastNEP::compute(
           atom.cpu_mass[i_cpu[domain]] = mass_new;
 
           gpu_flip<<<1, 1>>>(
-            i_cpu[domain],// TODO использовать device
-            type_j_cpu[domain],// TODO использовать device
+            i_cpu[domain],
+            type_j_cpu[domain],
             mass_new,
             mass_old / mass_new,
             atom.type.data(),
