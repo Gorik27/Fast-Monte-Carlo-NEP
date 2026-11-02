@@ -151,7 +151,10 @@ public:
 
   void find_subdomain_list(
     const Box& box,
-    const GPU_Vector<double>& position_per_atom);
+    const GPU_Vector<double>& position_per_atom,
+    const double dsx,
+    const double dsy,
+    const double dsz);
 
   void compute_large_box(
     Box& box,

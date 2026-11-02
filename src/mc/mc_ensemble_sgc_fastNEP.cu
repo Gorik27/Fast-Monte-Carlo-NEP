@@ -198,53 +198,6 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
 
 MC_Ensemble_SGC_fastNEP::~MC_Ensemble_SGC_fastNEP(void) { mc_output.close(); }
 
-static __global__ void get_neighbors_of_i_fastNEP(
-  const int n_max,
-  const int N,
-  const Box box,
-  const int* i,
-  const int N_domains,
-  const float rc_radial_square,
-  const double* __restrict__ g_x,
-  const double* __restrict__ g_y,
-  const double* __restrict__ g_z,
-  int* g_NN_i,
-  int* g_NL_i,
-  float* g_pe_nep_before,
-  float* g_pe_nep_before_local)
-{
-  int n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n < N) {
-    double x0 = g_x[n];
-    double y0 = g_y[n];
-    double z0 = g_z[n];
-    double pe_n = g_pe_nep_before[n];
-
-    for (int domain = 0; domain < N_domains; ++domain){
-      int target_idx = i[domain];
-      if (target_idx < 0){ continue;}
-      if (n != target_idx){
-
-        double x0i = g_x[target_idx] - x0;
-        double y0i = g_y[target_idx] - y0;
-        double z0i = g_z[target_idx] - z0;
-
-        apply_mic(box, x0i, y0i, z0i);
-        float distance_square_i = float(x0i * x0i + y0i * y0i + z0i * z0i);
-
-        if (distance_square_i < rc_radial_square) {
-          int k = atomicAdd(&g_NN_i[domain], 1);
-          if (k < n_max) {
-            int index = k * N_domains + domain;
-            g_pe_nep_before_local[index] = pe_n; 
-            g_NL_i[index] = n;
-          }
-        }        
-      }
-    }
-  }
-}
-
 static __global__ void load_neighbors_of_i_fastNEP(
   const int n_max,
   const int N,
@@ -421,10 +374,17 @@ void MC_Ensemble_SGC_fastNEP::compute(
     atom.type, 
     atom.position_per_atom);
 
-  nep_energy_fast.find_subdomain_list(
+  std::uniform_real_distribution<double> dist(0.0, 1.0);// random shift applied in order to avoid correlation with doamin borders
+  double dsx = dist(rng);
+  double dsy = dist(rng);
+  double dsz = dist(rng);
+
+  nep_energy_fast.find_subdomain_list(// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
     box,
-    atom.position_per_atom);// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
-    // TODO: реализовать случайное смещение начала отсчета чтобы убрать корреляции из-за границ доменов
+    atom.position_per_atom,
+    dsx,
+    dsy,
+    dsz);
 
   std::vector<int> subdomain_contents_cpu(nep_energy_fast.nep_data.subdomain_contents.size());
   nep_energy_fast.nep_data.subdomain_contents.copy_to_host(subdomain_contents_cpu.data());

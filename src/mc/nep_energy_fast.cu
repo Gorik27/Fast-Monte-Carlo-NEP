@@ -1145,6 +1145,9 @@ static __device__ void find_subdomain_id(
   const double x,
   const double y,
   const double z,
+  const double dsx,
+  const double dsy,
+  const double dsz,
   const double* l_inv,
   const int* n_domains,
   int& subdomain_id_x,
@@ -1152,9 +1155,9 @@ static __device__ void find_subdomain_id(
   int& subdomain_id_z,
   int& subdomain_id)
 {
-  const double sx = box.cpu_h[9] * x + box.cpu_h[10] * y + box.cpu_h[11] * z;
-  const double sy = box.cpu_h[12] * x + box.cpu_h[13] * y + box.cpu_h[14] * z;
-  const double sz = box.cpu_h[15] * x + box.cpu_h[16] * y + box.cpu_h[17] * z;
+  const double sx = box.cpu_h[9] * x + box.cpu_h[10] * y + box.cpu_h[11] * z + dsx;
+  const double sy = box.cpu_h[12] * x + box.cpu_h[13] * y + box.cpu_h[14] * z + dsy;
+  const double sz = box.cpu_h[15] * x + box.cpu_h[16] * y + box.cpu_h[17] * z + dsz;
   subdomain_id_x = floor(sx * box.thickness_x * l_inv[0]);
   subdomain_id_y = floor(sy * box.thickness_y * l_inv[1]);
   subdomain_id_z = floor(sz * box.thickness_z * l_inv[2]);
@@ -1183,13 +1186,16 @@ static __device__ void find_subdomain_id(
   const double x,
   const double y,
   const double z,
+  const double dsx,
+  const double dsy,
+  const double dsz,
   const double* l_inv,
   const int* n_domains,
   int& subdomain_id
 )
 {
   int subdomain_id_x, subdomain_id_y, subdomain_id_z;
-  find_subdomain_id(box, x, y, z, l_inv, n_domains, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
+  find_subdomain_id(box, x, y, z, dsx, dsy, dsz, l_inv, n_domains, subdomain_id_x, subdomain_id_y, subdomain_id_z, subdomain_id);
 }
 
 static __global__ void find_subdomain_counts(
@@ -1199,13 +1205,16 @@ static __global__ void find_subdomain_counts(
   const double* x,
   const double* y,
   const double* z,
+  const double dsx,
+  const double dsy,
+  const double dsz,
   const int* n_domains,
   const double* l_inv)
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int subdomain_id;
-    find_subdomain_id(box, x[n1], y[n1], z[n1], l_inv, n_domains, subdomain_id);
+    find_subdomain_id(box, x[n1], y[n1], z[n1], dsx, dsy, dsz, l_inv, n_domains, subdomain_id);
     atomicAdd(&subdomain_count[subdomain_id], 1);
   }
 }
@@ -1219,13 +1228,16 @@ static __global__ void find_subdomain_contents(
   const double* x,
   const double* y,
   const double* z,
+  const double dsx,
+  const double dsy,
+  const double dsz,
   const int* n_domains,
   const double* l_inv)
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
     int subdomain_id;
-    find_subdomain_id(box, x[n1], y[n1], z[n1], l_inv, n_domains, subdomain_id);
+    find_subdomain_id(box, x[n1], y[n1], z[n1], dsx, dsy, dsz, l_inv, n_domains, subdomain_id);
     const int ind = atomicAdd(&subdomain_count[subdomain_id], 1);
     subdomain_contents[subdomain_count_sum[subdomain_id] + ind] = n1;
   }
@@ -1237,7 +1249,10 @@ static __global__ void find_subdomain_contents(
 
 void NEP_Energy_fast::find_subdomain_list(
     const Box& box,
-    const GPU_Vector<double>& position_per_atom){
+    const GPU_Vector<double>& position_per_atom,
+    const double dsx,
+    const double dsy,
+    const double dsz){
       find_subdomain_inv_size<<<1, 1>>>(nep_data.num_domains.data(), nep_data.subdomain_inv_size.data(), box);
 
       std::vector<double> subdomain_inv_size_cpu(3);
@@ -1276,6 +1291,9 @@ void NEP_Energy_fast::find_subdomain_list(
         x, 
         y, 
         z, 
+        dsx, 
+        dsy, 
+        dsz, 
         nep_data.num_domains.data(),
         nep_data.subdomain_inv_size.data());
       GPU_CHECK_KERNEL
@@ -1294,6 +1312,9 @@ void NEP_Energy_fast::find_subdomain_list(
         x,
         y,
         z,
+        dsx, 
+        dsy, 
+        dsz, 
         nep_data.num_domains.data(),
         nep_data.subdomain_inv_size.data());
       GPU_CHECK_KERNEL
