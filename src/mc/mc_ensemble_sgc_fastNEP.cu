@@ -147,7 +147,7 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
   const int Nz_domains_input,
   const char** param,
   int num_param,
-  double swap_fraction_mc_input,
+  int num_mc_steps_input,
   bool is_vcsgc_input,
   std::vector<std::string>& species_input,
   std::vector<int>& types_input,
@@ -166,7 +166,7 @@ MC_Ensemble_SGC_fastNEP::MC_Ensemble_SGC_fastNEP(
   Nz_subdomains = Nz_domains*2;
   N_domains = Nx_domains * Ny_domains * Nz_domains;
   N_subdomains = N_domains*8;
-  swap_fraction_mc = swap_fraction_mc_input;
+  num_mc_steps = num_mc_steps_input;
   is_vcsgc = is_vcsgc_input;
   species = species_input;
   types = types_input;
@@ -379,12 +379,30 @@ void MC_Ensemble_SGC_fastNEP::compute(
   double dsy = dist(rng);
   double dsz = dist(rng);
 
-  nep_energy_fast.find_subdomain_list(// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
-    box,
-    atom.position_per_atom,
-    dsx,
-    dsy,
-    dsz);
+  if (grouping_method >= 0){
+    nep_energy_fast.find_subdomain_list_group(// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
+      box,
+      atom.position_per_atom,
+      groups[grouping_method].contents.data() + groups[grouping_method].cpu_size_sum[group_id],
+      groups[grouping_method].cpu_size[group_id],
+      dsx,
+      dsy,
+      dsz);
+/* TODO
+           Локальные и глобальные индексы
+find_subdomain_contents получает x, y, z размера group_size, так что в subdomain_contents попадут локальные индексы 0..group_size-1, 
+а не номера атомов. Дальше, где выбирается атом для трансмутации, нужно делать g_group[contents[i]]. Если этого нет, 
+MC-ходы будут применяться к первым атомам системы, а не к атомам группы. Также проверьте, что subdomain_contents.size() >= group_size: 
+раньше он был размером N, но если выделялся иначе, memset выйдет за границу.*/
+  } 
+  else {
+    nep_energy_fast.find_subdomain_list(// in nep_energy_fast.nep_data.subdomain_class (0 - A, 1 - B, ... 7 - H)
+      box,
+      atom.position_per_atom,
+      dsx,
+      dsy,
+      dsz);
+  }
 
   std::vector<int> subdomain_contents_cpu(nep_energy_fast.nep_data.subdomain_contents.size());
   nep_energy_fast.nep_data.subdomain_contents.copy_to_host(subdomain_contents_cpu.data());
@@ -419,8 +437,6 @@ void MC_Ensemble_SGC_fastNEP::compute(
   }
 
   int num_accepted = 0;
-  int num_trials = static_cast<int>(std::round(swap_fraction_mc*double(group_size))); // change from total number of micro MC steps to fraction of the group size
-  num_trials = ((num_trials - 1) / N_domains + 1);
 
   std::uniform_int_distribution<int> color(0, 7);
 
@@ -438,7 +454,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
   GPU_Vector<int> index_new_species(N_domains);
   GPU_Vector<int> index_old_species(N_domains);
 
-  for (int step = 0; step < num_trials; ++step) {
+  for (int step = 0; step < num_mc_steps; ++step) {
     NN_ij.fill(0);
     pe_nep_before_local.fill(0.0f);
     NN_angular_i.fill(0);
@@ -469,11 +485,9 @@ void MC_Ensemble_SGC_fastNEP::compute(
       while (!allowed_species(species_found)) {
         int local_ind = r1[subdomain](rng);
         int global_ind = subdomain_contents_cpu[subdomain_count_sum_cpu[subdomain] + local_ind];
-        /*i_cpu[domain] = grouping_method >= 0
+        i_cpu[domain] = grouping_method >= 0
               ? groups[grouping_method].cpu_contents[groups[grouping_method].cpu_size_sum[group_id] + global_ind]
               : global_ind;
-         */ //TODO сделать проход в find_subdomains_list только по группе
-        i_cpu[domain] = global_ind;
         species_found = atom.cpu_atom_symbol[i_cpu[domain]];
         type_i_cpu[domain] = atom.cpu_type[i_cpu[domain]];
         if (++count > max_tries)
@@ -620,14 +634,14 @@ void MC_Ensemble_SGC_fastNEP::compute(
 
     if (is_vcsgc) {
       double A = 0.0;
-        for (int k = 0; k < species.size(); ++k) {
+        for (int k = 1; k < species.size(); ++k) { // skip the matrix specie
           int dN  = deltaN_tot[k];
           A += (double) (dN * dN + 2.0 * dN * (num_atoms_species[k] - (int)(target_concentration[k] * num_atoms)));
         }
-      float exponent = - (kappa / num_atoms) * A;
-      
+      float exponent = -(kappa / num_atoms) * A;
+      float probability = exp(exponent);
+
       float random_number = r2(rng);
-      float probability = exp(-exponent / (K_B * temperature));
       global_acceptance = (random_number < probability);
     }
     
@@ -691,7 +705,7 @@ void MC_Ensemble_SGC_fastNEP::compute(
     }
   }
 
-  mc_output << md_step << "  " << num_accepted / double(num_trials*N_domains) << " ";
+  mc_output << md_step << "  " << num_accepted / double(num_mc_steps*N_domains) << " ";
   for (int t = 0; t < types.size(); ++t) {
     mc_output << num_atoms_species[t] / double(atom.number_of_atoms) << " ";
   }

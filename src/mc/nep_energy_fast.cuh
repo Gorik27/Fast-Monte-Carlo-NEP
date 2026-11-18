@@ -156,6 +156,15 @@ public:
     const double dsy,
     const double dsz);
 
+  void find_subdomain_list_group(
+    const Box& box,
+    const GPU_Vector<double>& position_per_atom,
+    const int* group,
+    const int N,
+    const double dsx,
+    const double dsy,
+    const double dsz);
+
   void compute_large_box(
     Box& box,
     const GPU_Vector<int>& type,

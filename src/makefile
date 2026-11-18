@@ -21,7 +21,8 @@ CUDA_ARCH=-arch=sm_120
 ifdef OS # For Windows with the cl.exe compiler
 CFLAGS = -O3 $(CUDA_ARCH)
 else # For linux
-CFLAGS = -std=c++17 -ccbin /usr/bin/gcc-11 -O3 $(CUDA_ARCH) #-DDEBUG -DFAST_NEP_MC_TEST #  -g -G
+CFLAGS = -std=c++17 -ccbin /usr/bin/gcc-11 -O3 $(CUDA_ARCH) #-DDEBUG #  -g -G
+#CFLAGS += -DUSE_TABLE
 endif
 CFLAGS_TEST = $(CFLAGS) -DMC_TEST # flags of the testmc executable (MC test, see mc/mc.cu)
 INC = -I./

@@ -452,10 +452,6 @@ void MC_Ensemble_SGC::compute(
     grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
   std::uniform_int_distribution<int> r1(0, group_size - 1);
 
-  #ifdef FAST_NEP_MC_TEST
-    mc_debug_log << "# VCSGC original impementation; number of micro MC steps: " << num_steps_mc << std::endl;
-    mc_debug_log << "# i; type_i; type_j; energy_difference" << std::endl;
-  #endif
 
   int num_accepted = 0;
   for (int step = 0; step < num_steps_mc; ++step) {
@@ -480,10 +476,6 @@ void MC_Ensemble_SGC::compute(
 
     float energy_difference = find_energy_difference(i, type_j, atom, box);
 
-    #ifdef FAST_NEP_MC_TEST
-      mc_debug_log << i << "; " << type_i << "; " << type_j << "; " << energy_difference  << std::endl;
-    #endif
-
     if (!is_vcsgc) {
       energy_difference += mu_or_phi[index_new_species] - mu_or_phi[index_old_species];
     } else {
@@ -496,9 +488,6 @@ void MC_Ensemble_SGC::compute(
     std::uniform_real_distribution<float> r2(0, 1);
     float random_number = r2(rng);
     float probability = exp(-energy_difference / (K_B * temperature));
-    #ifdef FAST_NEP_MC_TEST
-      probability = 0.5;
-    #endif
 
     if (random_number < probability) {
       ++num_accepted;

@@ -31,13 +31,7 @@ The driver class for the various MC ensembles.
 
 void MC::initialize(void)
 {
-  #ifdef FAST_NEP_MC_TEST
-    printf("FAST_NEP_MC_TEST is on: the MC SGC ensemble uses a constant acceptance probability (p=0.5), and debug files are generated to compare the fastNEP and original implementations.\n");
-    #ifndef DEBUG
-      printf("WARNING: FAST_NEP_MC_TEST should only be used with the DEBUG flag enabled.\n");
-    #endif
-  #endif
-  // todo
+
 }
 
 void MC::finalize(void) { do_mcmd = false; }
@@ -432,15 +426,6 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     }
     printf("    after every %d MD steps, do %d MC trials.\n", num_steps_md, num_steps_mc);
   }
-  else if (mc_ensemble_type >=3 && mc_ensemble_type <=6){
-    if (!is_valid_real(param[3], &swap_fraction_mc)) {
-      PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be a number.\n");
-    }
-    if (swap_fraction_mc <= 0) {
-      PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be positive.\n");
-    }
-    printf("    after every %d MD steps, swap %g atoms via MC.\n", num_steps_md, swap_fraction_mc);
-  }
 
   if (!is_valid_real(param[4], &temperature_initial)) {
     PRINT_INPUT_ERROR("initial temperature for MCMD should be a number.\n");
@@ -512,7 +497,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
       if (!is_valid_real(param[7 + n * 2 + 1], &mu_or_phi[n])) {
         PRINT_INPUT_ERROR("mu or phi should be a number.\n");
       }
-      printf("        species = %s, mu/phi= %g\n", species[n].c_str(), mu_or_phi[n]);
+      printf("        species = %s, mu/phi = %g\n", species[n].c_str(), mu_or_phi[n]);
     }
   }
 
@@ -540,14 +525,25 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
       if (!is_valid_real(param[7 + n * 3 + 1], &mu_or_phi[n])) {
         PRINT_INPUT_ERROR("mu or phi should be a number.\n");
       }
+      if (n == 0){
+        printf("        species = %s, mu/phi= %g (MATRIX: target_concentration is ignored)\n", species[n].c_str(), mu_or_phi[n]);
+        continue;
+      }
       if (!is_valid_real(param[7 + n * 3 + 2], &target_conc[n])) {
         PRINT_INPUT_ERROR("target concentration should be a number.\n");
       }
       if (target_conc[n] < 0.0 || target_conc[n] > 1.0){
         PRINT_INPUT_ERROR("target concentration should be from 0 to 1.\n");
       }
-      printf("        species = %s, mu/phi= %g, c0= %g\n", species[n].c_str(), mu_or_phi[n], target_conc[n]);
+      printf("        species = %s, mu/phi = %g (SOLUTE: target_concentration = %g)\n", species[n].c_str(), mu_or_phi[n], target_conc[n]);
     }
+  }
+  target_conc[0] = 1.0;
+  for (int n = 1; n < num_types_mc; ++n) {
+    target_conc[0] -= target_conc[n];
+  }
+  if (target_conc[0] < 0.0){
+    PRINT_INPUT_ERROR("the sum of solute target concentrations exceeds 1!.\n");
   }
 
   if (mc_ensemble_type == 2 || mc_ensemble_type == 4) {
@@ -566,6 +562,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
   int Nx_domains = 1;
   int Ny_domains = 1;
   int Nz_domains = 1;
+  int N_domains = 1;
   if (mc_ensemble_type == 6) {
     if (num_param < 10 + num_types_mc * 3 + 1) {
       PRINT_INPUT_ERROR("Should have kappa for VCSGC.\n");
@@ -606,7 +603,22 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     if (Nx_domains <= 0 || Ny_domains <= 0 || Nz_domains <= 0) {
       PRINT_INPUT_ERROR("number of domains should be positive.\n");
     }
-    printf("    number of domains = (%d, %d, %d)\n", Nx_domains, Ny_domains, Nz_domains);
+    N_domains = Nx_domains * Ny_domains * Nz_domains;
+    printf("    number of domains = %d\n        %d along X axis\n        %d along Y axis\n        %d along Z axis\n", N_domains, Nx_domains, Ny_domains, Nz_domains);
+  }
+
+  if (mc_ensemble_type >=3 && mc_ensemble_type <=6){
+    if (!is_valid_real(param[3], &swap_fraction_mc)) {
+      PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be a number.\n");
+    }
+    if (swap_fraction_mc <= 0) {
+      PRINT_INPUT_ERROR("swap fraction for MC steps for MCMD should be positive.\n");
+    }
+    int group_size =
+    grouping_method >= 0 ? groups[grouping_method].cpu_size[group_id] : atom.number_of_atoms;
+    num_steps_mc = static_cast<int>(std::round(swap_fraction_mc*double(group_size)));
+    num_steps_mc = ((num_steps_mc - 1) / N_domains + 1);
+    printf("    after every %d MD steps, swap %d atoms via MC.\n", num_steps_md, num_steps_mc*N_domains);
   }
 
   int num_param_before_group = 6;
@@ -614,7 +626,7 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     num_param_before_group = 7 + num_types_mc * 2;
   } else if (mc_ensemble_type == 2 || mc_ensemble_type == 4) {
     num_param_before_group = 8 + num_types_mc * 2;
-  } else if (mc_ensemble_type == 5) { // TODO что это?
+  } else if (mc_ensemble_type == 5) {
     num_param_before_group = 10 + num_types_mc * 2;
   } else if (mc_ensemble_type == 6) {
     num_param_before_group = 11 + num_types_mc * 3;
@@ -626,12 +638,6 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
     }
     parse_group(param, num_param, groups, num_param_before_group);
     printf("    only for atoms in group %d of grouping method %d.\n", group_id, grouping_method);
-  }
-
-  if (mc_ensemble_type == 5 || mc_ensemble_type == 6){
-    if (grouping_method >= 0){
-      PRINT_INPUT_ERROR("grouping unsuported in MCMD parallel now! Groups will be ignored");
-    }
   }
 
   types.resize(num_types_mc);
@@ -651,19 +657,19 @@ void MC::parse_mc(const char** param, int num_param, std::vector<Group>& groups,
   } else if (mc_ensemble_type == 3) {
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
-      atom.number_of_atoms, 1, 1, 1, param, num_param, swap_fraction_mc, false, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
+      atom.number_of_atoms, 1, 1, 1, param, num_param, num_steps_mc, false, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   } else if (mc_ensemble_type == 4) {
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
-      atom.number_of_atoms, 1, 1, 1, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
+      atom.number_of_atoms, 1, 1, 1, param, num_param, num_steps_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   } else if (mc_ensemble_type == 5) {
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
-      atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, swap_fraction_mc, false, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
+      atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, num_steps_mc, false, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   } else if (mc_ensemble_type == 6) {
     check_species_sgc(groups, atom);
     mc_ensemble.reset(new MC_Ensemble_SGC_fastNEP(
-      atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, swap_fraction_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
+      atom.number_of_atoms, Nx_domains, Ny_domains, Nz_domains, param, num_param, num_steps_mc, true, species, types, num_atoms_species, mu_or_phi, target_conc, kappa));
   }
 
 #ifdef MC_TEST

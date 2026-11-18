@@ -1319,3 +1319,110 @@ void NEP_Energy_fast::find_subdomain_list(
         nep_data.subdomain_inv_size.data());
       GPU_CHECK_KERNEL
     }
+
+static __global__ void find_position_of_group_atoms(
+  const int* __restrict__ g_group,
+  const double* __restrict__ g_x,
+  const double* __restrict__ g_y,
+  const double* __restrict__ g_z,
+  const int group_size,
+  double* x,
+  double* y,
+  double* z)
+{
+  int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n < group_size) {
+    int global_index = g_group[n];
+    x[n] = g_x[global_index];
+    y[n] = g_y[global_index];
+    z[n] = g_z[global_index];
+  }
+}
+
+void NEP_Energy_fast::find_subdomain_list_group(
+    const Box& box,
+    const GPU_Vector<double>& position_per_atom,
+    const int* group,
+    const int group_size,
+    const double dsx,
+    const double dsy,
+    const double dsz){
+      find_subdomain_inv_size<<<1, 1>>>(nep_data.num_domains.data(), nep_data.subdomain_inv_size.data(), box);
+
+      std::vector<double> subdomain_inv_size_cpu(3);
+      nep_data.subdomain_inv_size.copy_to_host(subdomain_inv_size_cpu.data(), 3);
+
+      double rc_twice = paramb.rc_radial*2;
+      for (int dim = 0; dim<3; ++dim){
+        if (subdomain_inv_size_cpu[dim]*rc_twice>1.0){ 
+          std::cout << "Domain dimension along each axis must be larger then 4 cutoff radius!" << std::endl;
+          exit(1);
+        } 
+      }
+      const int block_size = 256;
+      const int grid_size = (group_size - 1) / block_size + 1;
+
+      GPU_Vector<double> x;
+      GPU_Vector<double> y;
+      GPU_Vector<double> z;
+      x.resize(group_size);
+      y.resize(group_size);
+      z.resize(group_size);
+
+      int num_atoms = position_per_atom.size() / 3;
+      find_position_of_group_atoms<<<grid_size, block_size>>>(
+        group,
+        position_per_atom.data(),
+        position_per_atom.data() + num_atoms, 
+        position_per_atom.data() + 2 * num_atoms,  
+        group_size, 
+        x.data(), 
+        y.data(), 
+        z.data());
+
+
+      // number of domains is allowed to be larger than the number of atoms
+      if (N_subdomains > nep_data.subdomain_count.size()) {
+        nep_data.subdomain_count.resize(N_subdomains);
+        nep_data.subdomain_count_sum.resize(N_subdomains);
+      }
+
+      CHECK(gpuMemset(nep_data.subdomain_count.data(), 0, sizeof(int) * N_subdomains));
+      CHECK(gpuMemset(nep_data.subdomain_count_sum.data(), 0, sizeof(int) * N_subdomains));
+      CHECK(gpuMemset(nep_data.subdomain_contents.data(), 0, sizeof(int) * group_size));
+
+      find_subdomain_counts<<<grid_size, block_size>>>(
+        box, 
+        group_size, 
+        nep_data.subdomain_count.data(), 
+        x.data(), 
+        y.data(), 
+        z.data(), 
+        dsx, 
+        dsy, 
+        dsz, 
+        nep_data.num_domains.data(),
+        nep_data.subdomain_inv_size.data());
+      GPU_CHECK_KERNEL
+
+      thrust::exclusive_scan(
+        thrust::device, nep_data.subdomain_count.data(), nep_data.subdomain_count.data() + N_subdomains, nep_data.subdomain_count_sum.data());
+
+      CHECK(gpuMemset(nep_data.subdomain_count.data(), 0, sizeof(int) * N_subdomains));
+
+      find_subdomain_contents<<<grid_size, block_size>>>(
+        box,
+        group_size,
+        nep_data.subdomain_count.data(),
+        nep_data.subdomain_count_sum.data(),
+        nep_data.subdomain_contents.data(),
+        x.data(),
+        y.data(),
+        z.data(),
+        dsx, 
+        dsy, 
+        dsz, 
+        nep_data.num_domains.data(),
+        nep_data.subdomain_inv_size.data());
+      GPU_CHECK_KERNEL
+    }

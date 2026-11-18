@@ -36,7 +36,7 @@ public:
     const int Nz_domains,
     const char** param,
     int num_param,
-    double swap_fraction_mc,
+    int num_mc_steps,
     bool is_vcsgc,
     std::vector<std::string>& species,
     std::vector<int>& types,
@@ -67,7 +67,7 @@ private:
   GPU_Vector<float> pe_nep_before_local;
   GPU_Vector<float> delta_pe_nep;
   GPU_Vector<float> delta_pe_zbl;
-  double swap_fraction_mc;
+  int num_mc_steps;
   bool is_vcsgc = false;
   std::vector<std::string> species;
   std::vector<int> types;
